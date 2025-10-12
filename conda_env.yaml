@@ -9,6 +9,8 @@ dependencies:
   - scikit-learn
   - scikit-survival
   - xgboost
+  - prophet
+  - statsmodels
   - plotly
   - nbformat
   - ipykernel
