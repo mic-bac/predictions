@@ -91,6 +91,9 @@ train_merged = train_df.merge(stores_df, on='Store', how='left')
 # Merge with features
 train_merged = train_merged.merge(features_df, on=['Store', 'Date'], how='left')
 
+# Remove all negative sales
+train_merged = train_merged[train_merged["Weekly_Sales"] > 0]
+
 print(f"Merged train shape: {train_merged.shape}")
 print("\n--- Combined Data Info ---")
 print(train_merged.info())
@@ -269,7 +272,7 @@ print(train_engineered[['Date', 'Year', 'Month', 'Week',
 
 # We create a test and a training set (for TS we just take the last 5% of dates available for test)
 train_engineered.drop(markdown_cols, axis=1, inplace=True) # we drop them as we shouldn't know them in the future
-train_dates, test_dates = np.split(train_engineered.Date.unique(), [int(.5 *len(train_engineered.Date.unique()))])
+train_dates, test_dates = np.split(train_engineered.Date.unique(), [int(.95 *len(train_engineered.Date.unique()))])
 test_engineered = train_engineered[train_engineered.Date.isin(test_dates)]
 train_engineered = train_engineered[train_engineered.Date.isin(train_dates)]
 
@@ -375,11 +378,29 @@ print("="*70)
 prophet_train = baseline_train.copy()
 prophet_test = baseline_test.copy()
 prophet_test = prophet_test.rename(columns={'Date': 'ds', 'Weekly_Sales': 'y'})
-prophet_test["y"] = np.nan
+#prophet_test["y"] = np.nan
 
 # Rename columns for Prophet
 prophet_df = prophet_train.rename(columns={'Date': 'ds', 'Weekly_Sales': 'y'})
 prophet_predict = pd.concat([prophet_df, prophet_test], axis=0).reset_index(drop=True)
+
+prophet_df = prophet_df.groupby(
+    [
+        'Store', 'ds', 'Size', 'Temperature',
+        'Fuel_Price', 'CPI', 'Unemployment', 'Year', 'Month', 'Week', 'Quarter',
+        'Type_Encoded', 'IsHoliday_Int', 'Size_Type', 'Month_Sin', 'Month_Cos',
+        'Week_Sin', 'Week_Cos'
+    ]
+).agg({"y": "sum"}).reset_index()
+
+prophet_predict = prophet_predict.groupby(
+    [
+        'Store', 'ds', 'Size', 'Temperature',
+        'Fuel_Price', 'CPI', 'Unemployment', 'Year', 'Month', 'Week', 'Quarter',
+        'Type_Encoded', 'IsHoliday_Int', 'Size_Type', 'Month_Sin', 'Month_Cos',
+        'Week_Sin', 'Week_Cos'
+    ]
+).agg({"y": "sum"}).reset_index()
 
 # Identify holidays (these are the major Walmart holidays)
 walmart_holidays = pd.DataFrame({
@@ -406,51 +427,36 @@ prophet_model = Prophet(
 )
 
 # Add external regressors (optional, improves accuracy)
-for col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment', 'Holiday_Flag']:
+for col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment', 
+            'IsHoliday_Int', 'Year', 'Month', 'Quarter', 
+            'Type_Encoded', 'IsHoliday_Int']:
     prophet_model.add_regressor(col)
 
 # Add holiday effects
 prophet_model.add_country_holidays(country_name='US')
 
-prophet_model.fit(prophet_df)
+prophet_model.fit(prophet_df[prophet_df.Store == 1])
 print("Prophet model training complete!")
 
-# # Make future dataframe
-# future_dates = pd.date_range(
-#     start=prophet_df['ds'].max() + pd.Timedelta(days=7),
-#     periods=39,  # Approximately 39 weeks ahead
-#     freq='W'
-# )
-# future_df = pd.DataFrame({'ds': future_dates})
 
-# # Add regressors for future (using mean values as placeholder)
-# for col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']:
-#     future_df[col] = prophet_train[col].mean()
+# Predict prophet
 
-# # Make forecast
-# forecast_prophet = prophet_model.make_future_dataframe(periods=39, freq='W')
-# forecast_prophet[['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']] = prophet_train[
-#     ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment']
-# ].mean()
-
-prophet_yhat = prophet_predict.copy()
+prophet_yhat = prophet_predict[prophet_predict["Store"] == 1].copy()
 prophet_yhat["yhat"] = float()
 prophet_yhat["yhat_lower"] = float()
 prophet_yhat["yhat_upper"] = float()
 
-for store in prophet_predict["Store"].unique():
+for store in [1]:
     print(f"Started store {store}")
     forecast_prophet = prophet_model.predict(prophet_predict[prophet_predict["Store"] == store])
 
-    prophet_yhat["yhat"][prophet_yhat["Store"] == store] = forecast_prophet["yhat"].values
-    prophet_yhat["yhat_lower"][prophet_yhat["Store"] == store] = forecast_prophet["yhat_lower"].values
-    prophet_yhat["yhat_upper"][prophet_yhat["Store"] == store] = forecast_prophet["yhat_upper"].values
+    prophet_yhat.loc[prophet_yhat["Store"] == store, "yhat"] = forecast_prophet["yhat"].values
+    prophet_yhat.loc[prophet_yhat["Store"] == store, "yhat_lower"] = forecast_prophet["yhat_lower"].values
+    prophet_yhat.loc[prophet_yhat["Store"] == store, "yhat_upper"] = forecast_prophet["yhat_upper"].values
 
 print("\nProphet Forecast Test:")
 print(forecast_prophet[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail())
 
-prophet_yhat = prophet_yhat.merge(baseline_test[["Store", "Dept", "Date", "Weekly_Sales", "Type"]], left_on=["Store", "Dept", "ds"], right_on=["Store", "Dept", "Date"], how="left")
-prophet_yhat["y"] = prophet_yhat["y"].fillna(prophet_yhat["Weekly_Sales"])
 
 # Plot the forecast
 fig = prophet_model.plot(forecast_prophet, figsize=(14, 8))
@@ -464,13 +470,17 @@ fig_components.suptitle('Prophet: Trend, Seasonality, and Holiday Components',
 fig_components.show()
 
 # Calculate metrics
-mae_pr = mean_absolute_error(prophet_yhat[prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[prophet_yhat.Weekly_Sales.isna()].yhat)
-rmse_pr = np.sqrt(mean_squared_error(prophet_yhat[prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[prophet_yhat.Weekly_Sales.isna()].yhat))
-r2_pr = r2_score(prophet_yhat[prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[prophet_yhat.Weekly_Sales.isna()].yhat)
+y_true = prophet_yhat[prophet_yhat.ds < baseline_test.Date.min()].y
+y_hat = prophet_yhat[prophet_yhat.ds < baseline_test.Date.min()].yhat
+mae_pr = mean_absolute_error(y_true, y_hat)
+rmse_pr = np.sqrt(mean_squared_error(y_true, y_hat))
+r2_pr = r2_score(y_true, y_hat)
 
-mae_pr_test = mean_absolute_error(prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].yhat)
-rmse_pr_test = np.sqrt(mean_squared_error(prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].yhat))
-r2_pr_test = r2_score(prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].y, prophet_yhat[-prophet_yhat.Weekly_Sales.isna()].yhat)
+y_true = prophet_yhat[prophet_yhat.ds >= baseline_test.Date.min()].y
+y_hat = prophet_yhat[prophet_yhat.ds >= baseline_test.Date.min()].yhat
+mae_pr_test = mean_absolute_error(y_true, y_hat)
+rmse_pr_test = np.sqrt(mean_squared_error(y_true, y_hat))
+r2_pr_test = r2_score(y_true, y_hat)
 
 print(f"\nProphet - Training Set Performance:")
 print(f"  Mean Absolute Error (MAE): ${mae_pr:,.2f}")
@@ -589,18 +599,24 @@ print("\nTraining Linear Regression WITHOUT scaling for comparison...")
 lr_model_unscaled = LinearRegression()
 lr_model_unscaled.fit(X_train_baseline, y_train_baseline)
 y_train_pred_lr_unscaled = lr_model_unscaled.predict(X_train_baseline)
+y_test_pred_lr_unscaled = lr_model_unscaled.predict(X_test_baseline)
 
 mae_lr_unscaled = mean_absolute_error(y_train_baseline, y_train_pred_lr_unscaled)
 rmse_lr_unscaled = np.sqrt(mean_squared_error(y_train_baseline, y_train_pred_lr_unscaled))
 r2_lr_unscaled = r2_score(y_train_baseline, y_train_pred_lr_unscaled)
 
+mae_lr_unscaled_test = mean_absolute_error(y_test_baseline, y_test_pred_lr_unscaled)
+rmse_lr_unscaled_test = np.sqrt(mean_squared_error(y_test_baseline, y_test_pred_lr_unscaled))
+r2_lr_unscaled_test = r2_score(y_test_baseline, y_test_pred_lr_unscaled)
+
 # Create comparison dataframe
 comparison_df = pd.DataFrame({
-    'Model': ['Linear Regression (Unscaled)', 'Linear Regression (Scaled)', 
-              'XGBoost (Train)', 'XGBoost (Validation)'],
-    'MAE': [mae_lr_unscaled, mae_lr, mae_xgb_train, mae_xgb_val],
-    'RMSE': [rmse_lr_unscaled, rmse_lr, rmse_xgb_train, rmse_xgb_val],
-    'R² Score': [r2_lr_unscaled, r2_lr, r2_xgb_train, r2_xgb_val]
+    'Model': ['LR Train (Unscaled)', 'LR Train (Scaled)', 
+              'LR Test (Unscaled)', 'LR Test (Scaled)',
+              'XGBoost (Train)', 'XGBoost (Validation)', 'XGBoost (Test)'],
+    'MAE': [mae_lr_unscaled, mae_lr, mae_lr_unscaled_test, mae_lr_test, mae_xgb_train, mae_xgb_val, mae_xgb_test],
+    'RMSE': [rmse_lr_unscaled, rmse_lr, rmse_lr_unscaled_test, rmse_lr_test, rmse_xgb_train, rmse_xgb_val, rmse_xgb_test],
+    'R² Score': [r2_lr_unscaled, r2_lr, r2_lr_unscaled_test, r2_lr_test, r2_xgb_train, r2_xgb_val, r2_xgb_test]
 })
 
 print("\n--- Model Performance Summary ---")
@@ -645,9 +661,9 @@ print("\nGenerating prediction visualizations...")
 
 # For XGBoost on validation set
 prediction_viz_df = pd.DataFrame({
-    'Actual': y_val_split.values,
-    'Predicted': y_val_pred_xgb,
-    'Residual': y_val_split.values - y_val_pred_xgb
+    'Actual': baseline_test.Weekly_Sales,
+    'Predicted': y_test_pred_xgb,
+    'Residual': baseline_test.Weekly_Sales - y_test_pred_xgb
 })
 
 # Actual vs Predicted scatter plot
@@ -672,7 +688,7 @@ fig.add_trace(go.Scatter(
 ))
 
 fig.update_layout(
-    title='XGBoost: Actual vs Predicted Sales',
+    title='XGBoost: Actual vs Predicted Sales (on test)',
     xaxis_title='Actual Sales',
     yaxis_title='Predicted Sales',
     height=500,
