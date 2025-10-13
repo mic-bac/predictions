@@ -37,6 +37,9 @@ import xgboost as xgb
 # For time series decomposition
 from statsmodels.tsa.seasonal import seasonal_decompose
 
+# Install plotting function
+from src.utils.ts_plot import plot_time_series
+
 # %%
 # 1. DATA LOADING AND EXPLORATION
 # ============================================================================
@@ -272,9 +275,11 @@ print(train_engineered[['Date', 'Year', 'Month', 'Week',
 
 # We create a test and a training set (for TS we just take the last 5% of dates available for test)
 train_engineered.drop(markdown_cols, axis=1, inplace=True) # we drop them as we shouldn't know them in the future
+df_plot_y = train_engineered[["Date", "Store", "Dept", "Weekly_Sales"]]
 train_dates, test_dates = np.split(train_engineered.Date.unique(), [int(.95 *len(train_engineered.Date.unique()))])
 test_engineered = train_engineered[train_engineered.Date.isin(test_dates)]
 train_engineered = train_engineered[train_engineered.Date.isin(train_dates)]
+
 
 # %%
 # 7. BASELINE MODEL: LINEAR REGRESSION (with scikit-learn)
@@ -320,6 +325,20 @@ lr_model.fit(X_train_baseline_scaled, y_train_baseline)
 # Predictions on training set (for evaluation)
 y_train_pred_lr = lr_model.predict(X_train_baseline_scaled)
 y_test_pred_lr = lr_model.predict(X_test_baseline_scaled)
+
+df_plot_y["yhat"] = np.concatenate([y_train_pred_lr, y_test_pred_lr])
+df_plot_ygrp = df_plot_y.groupby(["Date", "Store"]).agg({"Weekly_Sales": "sum", "yhat": "sum"}).reset_index()
+df_plot_y.drop('yhat', axis=1, inplace=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="Linear Regression"
+)
 
 # Calculate metrics
 mae_lr = mean_absolute_error(y_train_baseline, y_train_pred_lr)
@@ -458,6 +477,16 @@ print("\nProphet Forecast Test:")
 print(forecast_prophet[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail())
 
 
+plot_time_series(
+    x=forecast_prophet.ds, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales, 
+    yhat=forecast_prophet.yhat,
+    yhat_lower=forecast_prophet.yhat_lower,
+    yhat_upper=forecast_prophet.yhat_lower,
+    vline_x=train_dates.max(),
+    title="Prophet"
+)
+
 # Plot the forecast
 fig = prophet_model.plot(forecast_prophet, figsize=(14, 8))
 fig.suptitle('Prophet: Sales Forecast with Confidence Intervals', fontsize=14, y=0.98)
@@ -534,6 +563,38 @@ y_train_pred_xgb = xgb_model.predict(X_train_split)
 y_val_pred_xgb = xgb_model.predict(X_val_split)
 y_test_pred_xgb = xgb_model.predict(baseline_test[feature_cols])
 
+train_split_yhat = X_train_split.join(baseline_train["Date"])
+train_split_yhat["yhat"] = y_train_pred_xgb
+train_split_yhat["Weekly_Sales"] = y_train_split
+val_split_yhat = X_val_split.join(baseline_train["Date"])
+val_split_yhat["yhat"] = y_val_pred_xgb
+val_split_yhat["Weekly_Sales"] = y_val_split
+test_split_yhat = baseline_test.copy()
+test_split_yhat["yhat"] = y_test_pred_xgb
+
+
+df_plot_y = pd.concat(
+    [
+        train_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]], 
+        val_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]], 
+        test_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]]
+    ]
+).reset_index(drop=True)
+df_plot_ygrp = df_plot_y.groupby(["Date", "Store"]).agg({"Weekly_Sales": "sum", "yhat": "sum"}).sort_values("Date").reset_index()
+df_plot_y.drop('yhat', axis=1, inplace=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="XGBoost"
+)
+
+
+
 # Calculate metrics
 mae_xgb_train = mean_absolute_error(y_train_split, y_train_pred_xgb)
 rmse_xgb_train = np.sqrt(mean_squared_error(y_train_split, y_train_pred_xgb))
@@ -561,6 +622,21 @@ print(f"\nXGBoost - Test Set Performance:")
 print(f"  MAE: ${mae_xgb_test:,.2f}")
 print(f"  RMSE: ${rmse_xgb_test:,.2f}")
 print(f"  R² Score: {r2_xgb_test:.4f}")
+
+print(f"\nXGBoost - Test Set Performance Store 1:")
+print(f"""  MAE: ${mean_absolute_error(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):,.2f}""")
+print(f"""  RMSE: ${np.sqrt(mean_squared_error(
+    
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+)):,.2f}""")
+print(f"""  R² Score: {r2_score(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):.4f}""")
 
 # Feature importance from XGBoost
 feature_importance_xgb = pd.DataFrame({
@@ -714,80 +790,3 @@ fig.update_layout(
     template='plotly_white'
 )
 fig.show()
-
-# %%
-# 12. KEY INSIGHTS AND RECOMMENDATIONS
-# ============================================================================
-
-print("\n" + "="*70)
-print("KEY INSIGHTS & RECOMMENDATIONS")
-print("="*70)
-
-insights = """
-1. TIME SERIES PATTERNS:
-   - Strong weekly seasonality detected (52-week cycle)
-   - Significant spikes during holiday periods (Thanksgiving, Christmas)
-   - Upward trend during analysis period
-   
-2. FEATURE IMPORTANCE:
-   - Store and Department IDs are most important predictors
-   - Seasonal features (Month, Week) capture cyclical patterns
-   - Store Type and Size provide valuable categorical information
-   - External regressors (Temperature, Fuel Price, CPI) have moderate impact
-
-3. MODEL PERFORMANCE:
-   - XGBoost outperforms Linear Regression significantly
-   - XGBoost captures non-linear relationships and feature interactions
-   - Prophet is excellent for long-term trend forecasting
-   - Both models have reasonable validation performance (low overfitting)
-
-4. RECOMMENDATIONS FOR PRODUCTION:
-   - Use XGBoost for short-term (1-4 weeks) forecasts due to feature availability
-   - Use Prophet for longer-term strategic planning
-   - Ensemble both models by averaging predictions for robustness
-   - Monitor model performance and retrain regularly with new data
-   - Holiday features require careful handling and domain expertise
-   - Consider store-specific models for high-variance stores
-
-5. NEXT STEPS:
-   - Implement cross-validation across multiple stores
-   - Add external data (social media, competitor info)
-   - Build store-specific models instead of global model
-   - Explore deep learning (LSTM) for longer sequences
-   - Implement automated hyperparameter tuning
-   - Deploy models with Flask/FastAPI for real-time predictions
-"""
-
-print(insights)
-
-# %%
-# 13. SUMMARY
-# ============================================================================
-
-print("\n" + "="*70)
-print("NOTEBOOK SUMMARY")
-print("="*70)
-
-summary = """
-This notebook demonstrated a complete machine learning pipeline for time series
-sales forecasting using real Walmart data:
-
-✓ Data Loading: Merged 4 CSV files with different granularities
-✓ EDA: Explored patterns, distributions, and relationships
-✓ Time Series Decomposition: Identified trend, seasonality, and residuals
-✓ Feature Engineering: Created time-based and domain-specific features
-✓ Baseline Model: Linear Regression as performance benchmark
-✓ Prophet Model: Facebook's time series forecasting library
-✓ XGBoost Model: State-of-the-art gradient boosting regressor
-✓ Model Comparison: Evaluated using MAE, RMSE, and R² Score
-✓ Visualization: Plotly for interactive, publication-quality plots
-
-Key Learning Outcomes:
-- Understand the complete ML workflow from data to deployment
-- Learn how to handle time series data with multiple features
-- Discover the strengths/weaknesses of different forecasting approaches
-- Practice feature engineering for improved model performance
-- Implement production-ready models with scikit-learn, Prophet, and XGBoost
-"""
-
-print(summary)
