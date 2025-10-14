@@ -293,7 +293,7 @@ print("BASELINE MODEL: LINEAR REGRESSION")
 print("="*70)
 
 # Select features for the baseline model
-feature_cols = ['Store', 'Dept', 'Size', 'Type_Encoded', 'IsHoliday_Int', 
+feature_cols = ['Store', 'Dept', 'Size', 'Type_Encoded', 'IsHoliday_Int',
                 'Temperature', 'Fuel_Price', 'CPI', 'Unemployment', 'Quarter',
                 'Month', 'Week', 'Month_Sin', 'Month_Cos', 'Week_Sin', 'Week_Cos']
 
@@ -313,7 +313,7 @@ lr_scaler = StandardScaler()
 X_train_baseline_scaled = lr_scaler.fit_transform(X_train_baseline)
 X_train_baseline_scaled = pd.DataFrame(X_train_baseline_scaled, columns=feature_cols)
 
-X_test_baseline_scaled = lr_scaler.fit_transform(X_test_baseline)
+X_test_baseline_scaled = lr_scaler.transform(X_test_baseline)
 X_test_baseline_scaled = pd.DataFrame(X_test_baseline_scaled, columns=feature_cols)
 
 print("\nLinear Regression uses SCALED features:")
@@ -327,20 +327,6 @@ lr_model.fit(X_train_baseline_scaled, y_train_baseline)
 # Predictions on training set (for evaluation)
 y_train_pred_lr = lr_model.predict(X_train_baseline_scaled)
 y_test_pred_lr = lr_model.predict(X_test_baseline_scaled)
-
-df_plot_y["yhat"] = np.concatenate([y_train_pred_lr, y_test_pred_lr])
-df_plot_ygrp = df_plot_y.groupby(["Date", "Store"]).agg({"Weekly_Sales": "sum", "yhat": "sum"}).reset_index()
-df_plot_y.drop('yhat', axis=1, inplace=True)
-
-df_plot_ygrp[df_plot_ygrp.Store == 1]
-
-plot_time_series(
-    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
-    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
-    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
-    vline_x=train_dates.max(),
-    title="Linear Regression"
-)
 
 # Calculate metrics
 mae_lr = mean_absolute_error(y_train_baseline, y_train_pred_lr)
@@ -383,6 +369,141 @@ fig.update_layout(
     template='plotly_white'
 )
 fig.show()
+
+
+# Plot result for one store
+df_plot_y["yhat"] = np.concatenate([y_train_pred_lr, y_test_pred_lr])
+df_plot_ygrp = df_plot_y.groupby(["Date", "Store"]).agg({"Weekly_Sales": "sum", "yhat": "sum"}).reset_index()
+df_plot_y.drop('yhat', axis=1, inplace=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="Linear Regression Stores and Dpt"
+)
+
+# %% 7.1 Linear regression on store level
+grp_feature_cols = feature_cols.copy()
+grp_feature_cols.pop(1)
+df_agg_store_train = baseline_train.groupby(grp_feature_cols + ["Date"]).agg({"Weekly_Sales": "sum"}).reset_index()
+df_agg_store_test = baseline_test.groupby(grp_feature_cols + ["Date"]).agg({"Weekly_Sales": "sum"}).reset_index()
+
+X_train_baseline = df_agg_store_train[grp_feature_cols].copy()
+y_train_baseline = df_agg_store_train['Weekly_Sales']
+
+X_test_baseline = df_agg_store_test[grp_feature_cols].copy()
+y_test_baseline = df_agg_store_test['Weekly_Sales']
+
+lr_scaler = StandardScaler()
+X_train_baseline_scaled = lr_scaler.fit_transform(X_train_baseline)
+X_train_baseline_scaled = pd.DataFrame(X_train_baseline_scaled, columns=grp_feature_cols)
+X_test_baseline_scaled = lr_scaler.transform(X_test_baseline)
+X_test_baseline_scaled = pd.DataFrame(X_test_baseline_scaled, columns=grp_feature_cols)
+# Train linear regression on scaled data
+lr_model = LinearRegression()
+lr_model.fit(X_train_baseline_scaled, y_train_baseline)
+
+# Predictions on training set (for evaluation)
+y_train_pred_lr = lr_model.predict(X_train_baseline_scaled)
+y_test_pred_lr = lr_model.predict(X_test_baseline_scaled)
+
+# Calculate metrics
+mae_lr = mean_absolute_error(y_train_baseline, y_train_pred_lr)
+rmse_lr = np.sqrt(mean_squared_error(y_train_baseline, y_train_pred_lr))
+r2_lr = r2_score(y_train_baseline, y_train_pred_lr)
+
+mae_lr_test = mean_absolute_error(y_test_baseline, y_test_pred_lr)
+rmse_lr_test = np.sqrt(mean_squared_error(y_test_baseline, y_test_pred_lr))
+r2_lr_test = r2_score(y_test_baseline, y_test_pred_lr)
+
+print(f"\nLinear Regression - Training Set Performance:")
+print(f"  Mean Absolute Error (MAE): ${mae_lr:,.2f}")
+print(f"  Root Mean Squared Error (RMSE): ${rmse_lr:,.2f}")
+print(f"  R² Score: {r2_lr:.4f}")
+
+print(f"\nLinear Regression - Test Set Performance:")
+print(f"  Mean Absolute Error (MAE): ${mae_lr_test:,.2f}")
+print(f"  Root Mean Squared Error (RMSE): ${rmse_lr_test:,.2f}")
+print(f"  R² Score: {r2_lr_test:.4f}")
+
+# Plot result for one store
+df_agg_store_train["yhat"] = y_train_pred_lr
+df_agg_store_test["yhat"] = y_test_pred_lr
+df_plot_ygrp = pd.concat([df_agg_store_train, df_agg_store_test], axis=0)
+df_plot_ygrp = df_plot_ygrp.sort_values("Date").reset_index(drop=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="Linear Regression all Stores"
+)
+
+# %% 7.2 Linear Regression on Store 1 only
+X_train_baseline = df_agg_store_train[grp_feature_cols][df_agg_store_train.Store == 1].copy()
+y_train_baseline = df_agg_store_train[df_agg_store_train.Store == 1]['Weekly_Sales']
+
+X_test_baseline = df_agg_store_test[grp_feature_cols][df_agg_store_test.Store == 1].copy()
+y_test_baseline = df_agg_store_test[df_agg_store_test.Store == 1]['Weekly_Sales']
+
+lr_scaler = StandardScaler()
+X_train_baseline_scaled = lr_scaler.fit_transform(X_train_baseline)
+X_train_baseline_scaled = pd.DataFrame(X_train_baseline_scaled, columns=grp_feature_cols)
+X_test_baseline_scaled = lr_scaler.transform(X_test_baseline)
+X_test_baseline_scaled = pd.DataFrame(X_test_baseline_scaled, columns=grp_feature_cols)
+# Train linear regression on scaled data
+lr_model = LinearRegression()
+lr_model.fit(X_train_baseline_scaled, y_train_baseline)
+
+# Predictions on training set (for evaluation)
+y_train_pred_lr = lr_model.predict(X_train_baseline_scaled)
+y_test_pred_lr = lr_model.predict(X_test_baseline_scaled)
+
+# Calculate metrics
+mae_lr = mean_absolute_error(y_train_baseline, y_train_pred_lr)
+rmse_lr = np.sqrt(mean_squared_error(y_train_baseline, y_train_pred_lr))
+r2_lr = r2_score(y_train_baseline, y_train_pred_lr)
+
+mae_lr_test = mean_absolute_error(y_test_baseline, y_test_pred_lr)
+rmse_lr_test = np.sqrt(mean_squared_error(y_test_baseline, y_test_pred_lr))
+r2_lr_test = r2_score(y_test_baseline, y_test_pred_lr)
+
+print(f"\nLinear Regression - Training Set Performance:")
+print(f"  Mean Absolute Error (MAE): ${mae_lr:,.2f}")
+print(f"  Root Mean Squared Error (RMSE): ${rmse_lr:,.2f}")
+print(f"  R² Score: {r2_lr:.4f}")
+
+print(f"\nLinear Regression - Test Set Performance:")
+print(f"  Mean Absolute Error (MAE): ${mae_lr_test:,.2f}")
+print(f"  Root Mean Squared Error (RMSE): ${rmse_lr_test:,.2f}")
+print(f"  R² Score: {r2_lr_test:.4f}")
+
+# Plot result for one store
+df_agg_store_train_1 = df_agg_store_train[df_agg_store_train.Store == 1].reset_index()
+df_agg_store_test_1 = df_agg_store_test[df_agg_store_test.Store == 1].reset_index()
+
+df_agg_store_train_1["yhat"] = y_train_pred_lr
+df_agg_store_test_1["yhat"] = y_test_pred_lr
+df_plot_ygrp = pd.concat([df_agg_store_train_1, df_agg_store_test_1], axis=0)
+df_plot_ygrp = df_plot_ygrp.sort_values("Date").reset_index(drop=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="Linear Regression Store 1"
+)
+
 
 # %%
 # 8. PROPHET MODEL: TIME SERIES FORECASTING
@@ -486,7 +607,7 @@ plot_time_series(
     yhat_lower=forecast_prophet.yhat_lower,
     yhat_upper=forecast_prophet.yhat_lower,
     vline_x=train_dates.max(),
-    title="Prophet"
+    title="Prophet for Store 1"
 )
 
 # Plot the forecast
@@ -577,9 +698,9 @@ test_split_yhat["yhat"] = y_test_pred_xgb
 
 df_plot_y = pd.concat(
     [
-        train_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]], 
-        val_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]], 
-        test_split_yhat[["Date", "Store", "Dept", "Weekly_Sales", "yhat"]]
+        train_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        val_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        test_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]]
     ]
 ).reset_index(drop=True)
 df_plot_ygrp = df_plot_y.groupby(["Date", "Store"]).agg({"Weekly_Sales": "sum", "yhat": "sum"}).sort_values("Date").reset_index()
@@ -592,7 +713,7 @@ plot_time_series(
     y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
     yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
     vline_x=train_dates.max(),
-    title="XGBoost"
+    title="XGBoost for all Stores and Dept"
 )
 
 
@@ -609,6 +730,7 @@ r2_xgb_val = r2_score(y_val_split, y_val_pred_xgb)
 mae_xgb_test = mean_absolute_error(baseline_test.Weekly_Sales, y_test_pred_xgb)
 rmse_xgb_test = np.sqrt(mean_squared_error(baseline_test.Weekly_Sales, y_test_pred_xgb))
 r2_xgb_test = r2_score(baseline_test.Weekly_Sales, y_test_pred_xgb)
+
 
 print(f"\nXGBoost - Training Set Performance:")
 print(f"  MAE: ${mae_xgb_train:,.2f}")
