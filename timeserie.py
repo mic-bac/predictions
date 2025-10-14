@@ -224,6 +224,8 @@ store_1_sales_agg = store_1_sales.groupby('Date')['Weekly_Sales'].sum()
 # Perform seasonal decomposition
 decomposition = seasonal_decompose(store_1_sales_agg, model='additive', period=52)
 
+fig = px.scatter(x=pd.DataFrame(store_1_sales_agg).index, y=store_1_sales_agg, trendline="ols")
+fig.show()
 decomposition.plot()
 
 print("Decomposition complete. Key observations:")
