@@ -785,6 +785,252 @@ fig.update_layout(
 )
 fig.show()
 
+
+# %% 9.1 XGBOOST MODEL: GRADIENT BOOSTING REGRESSION on Store level
+# ============================================================================
+
+# Split training data for validation
+X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+    df_agg_store_train[grp_feature_cols], df_agg_store_train.Weekly_Sales, test_size=0.2, random_state=42
+)
+
+print(f"\nTraining set shape: {X_train_split.shape}")
+print(f"Validation set shape: {X_val_split.shape}")
+
+# Initialize XGBoost model with optimized hyperparameters
+print("\nTraining XGBoost model...")
+xgb_model = xgb.XGBRegressor(
+    n_estimators=200,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    gamma=1,
+    min_child_weight=1,
+    random_state=42,
+    n_jobs=-1,
+    verbosity=0
+)
+
+# Train with early stopping
+xgb_model.fit(
+    X_train_split, y_train_split,
+    eval_set=[(X_val_split, y_val_split)],
+    verbose=False
+)
+
+print("XGBoost model training complete!")
+
+# Make predictions
+y_train_pred_xgb = xgb_model.predict(X_train_split)
+y_val_pred_xgb = xgb_model.predict(X_val_split)
+y_test_pred_xgb = xgb_model.predict(df_agg_store_test[grp_feature_cols])
+
+train_split_yhat = X_train_split.join(df_agg_store_train["Date"])
+train_split_yhat["yhat"] = y_train_pred_xgb
+train_split_yhat["Weekly_Sales"] = y_train_split
+val_split_yhat = X_val_split.join(df_agg_store_train["Date"])
+val_split_yhat["yhat"] = y_val_pred_xgb
+val_split_yhat["Weekly_Sales"] = y_val_split
+test_split_yhat = df_agg_store_test.copy()
+test_split_yhat["yhat"] = y_test_pred_xgb
+
+
+df_plot_ygrp = pd.concat(
+    [
+        train_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        val_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        test_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]]
+    ]
+).sort_values("Date").reset_index(drop=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="XGBoost for all Stores"
+)
+
+
+
+# Calculate metrics
+mae_xgb_train = mean_absolute_error(y_train_split, y_train_pred_xgb)
+rmse_xgb_train = np.sqrt(mean_squared_error(y_train_split, y_train_pred_xgb))
+r2_xgb_train = r2_score(y_train_split, y_train_pred_xgb)
+
+mae_xgb_val = mean_absolute_error(y_val_split, y_val_pred_xgb)
+rmse_xgb_val = np.sqrt(mean_squared_error(y_val_split, y_val_pred_xgb))
+r2_xgb_val = r2_score(y_val_split, y_val_pred_xgb)
+
+mae_xgb_test = mean_absolute_error(df_agg_store_test.Weekly_Sales, y_test_pred_xgb)
+rmse_xgb_test = np.sqrt(mean_squared_error(df_agg_store_test.Weekly_Sales, y_test_pred_xgb))
+r2_xgb_test = r2_score(df_agg_store_test.Weekly_Sales, y_test_pred_xgb)
+
+
+print(f"\nXGBoost - Training Set Performance:")
+print(f"  MAE: ${mae_xgb_train:,.2f}")
+print(f"  RMSE: ${rmse_xgb_train:,.2f}")
+print(f"  R² Score: {r2_xgb_train:.4f}")
+
+print(f"\nXGBoost - Validation Set Performance:")
+print(f"  MAE: ${mae_xgb_val:,.2f}")
+print(f"  RMSE: ${rmse_xgb_val:,.2f}")
+print(f"  R² Score: {r2_xgb_val:.4f}")
+
+print(f"\nXGBoost - Test Set Performance:")
+print(f"  MAE: ${mae_xgb_test:,.2f}")
+print(f"  RMSE: ${rmse_xgb_test:,.2f}")
+print(f"  R² Score: {r2_xgb_test:.4f}")
+
+print(f"\nXGBoost - Test Set Performance Store 1:")
+print(f"""  MAE: ${mean_absolute_error(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):,.2f}""")
+print(f"""  RMSE: ${np.sqrt(mean_squared_error(
+    
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+)):,.2f}""")
+print(f"""  R² Score: {r2_score(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):.4f}""")
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="XGBoost for all Stores"
+)
+
+# %% 9.2 XGBOOST MODEL: GRADIENT BOOSTING REGRESSION on Store 1 only
+# ============================================================================
+
+# Split training data for validation
+X_train_split, X_val_split, y_train_split, y_val_split = train_test_split(
+    df_agg_store_train_1[grp_feature_cols], 
+    df_agg_store_train_1.Weekly_Sales, test_size=0.2, random_state=42
+)
+
+print(f"\nTraining set shape: {X_train_split.shape}")
+print(f"Validation set shape: {X_val_split.shape}")
+
+# Initialize XGBoost model with optimized hyperparameters
+print("\nTraining XGBoost model...")
+xgb_model = xgb.XGBRegressor(
+    n_estimators=200,
+    max_depth=6,
+    learning_rate=0.1,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    gamma=1,
+    min_child_weight=1,
+    random_state=42,
+    n_jobs=-1,
+    verbosity=0
+)
+
+# Train with early stopping
+xgb_model.fit(
+    X_train_split, y_train_split,
+    eval_set=[(X_val_split, y_val_split)],
+    verbose=False
+)
+
+print("XGBoost model training complete!")
+
+# Make predictions
+y_train_pred_xgb = xgb_model.predict(X_train_split)
+y_val_pred_xgb = xgb_model.predict(X_val_split)
+y_test_pred_xgb = xgb_model.predict(df_agg_store_test_1[grp_feature_cols])
+
+train_split_yhat = X_train_split.join(df_agg_store_train_1["Date"])
+train_split_yhat["yhat"] = y_train_pred_xgb
+train_split_yhat["Weekly_Sales"] = y_train_split
+val_split_yhat = X_val_split.join(df_agg_store_train_1["Date"])
+val_split_yhat["yhat"] = y_val_pred_xgb
+val_split_yhat["Weekly_Sales"] = y_val_split
+test_split_yhat = df_agg_store_test_1.copy()
+test_split_yhat["yhat"] = y_test_pred_xgb
+
+
+df_plot_ygrp = pd.concat(
+    [
+        train_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        val_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]], 
+        test_split_yhat[["Date", "Store", "Weekly_Sales", "yhat"]]
+    ]
+).sort_values("Date").reset_index(drop=True)
+
+df_plot_ygrp[df_plot_ygrp.Store == 1]
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="XGBoost for all Stores and Dept"
+)
+
+
+
+# Calculate metrics
+mae_xgb_train = mean_absolute_error(y_train_split, y_train_pred_xgb)
+rmse_xgb_train = np.sqrt(mean_squared_error(y_train_split, y_train_pred_xgb))
+r2_xgb_train = r2_score(y_train_split, y_train_pred_xgb)
+
+mae_xgb_val = mean_absolute_error(y_val_split, y_val_pred_xgb)
+rmse_xgb_val = np.sqrt(mean_squared_error(y_val_split, y_val_pred_xgb))
+r2_xgb_val = r2_score(y_val_split, y_val_pred_xgb)
+
+mae_xgb_test = mean_absolute_error(df_agg_store_test_1.Weekly_Sales, y_test_pred_xgb)
+rmse_xgb_test = np.sqrt(mean_squared_error(df_agg_store_test_1.Weekly_Sales, y_test_pred_xgb))
+r2_xgb_test = r2_score(df_agg_store_test_1.Weekly_Sales, y_test_pred_xgb)
+
+
+print(f"\nXGBoost - Training Set Performance:")
+print(f"  MAE: ${mae_xgb_train:,.2f}")
+print(f"  RMSE: ${rmse_xgb_train:,.2f}")
+print(f"  R² Score: {r2_xgb_train:.4f}")
+
+print(f"\nXGBoost - Validation Set Performance:")
+print(f"  MAE: ${mae_xgb_val:,.2f}")
+print(f"  RMSE: ${rmse_xgb_val:,.2f}")
+print(f"  R² Score: {r2_xgb_val:.4f}")
+
+print(f"\nXGBoost - Test Set Performance:")
+print(f"  MAE: ${mae_xgb_test:,.2f}")
+print(f"  RMSE: ${rmse_xgb_test:,.2f}")
+print(f"  R² Score: {r2_xgb_test:.4f}")
+
+print(f"\nXGBoost - Test Set Performance Store 1:")
+print(f"""  MAE: ${mean_absolute_error(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):,.2f}""")
+print(f"""  RMSE: ${np.sqrt(mean_squared_error(
+    
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+)):,.2f}""")
+print(f"""  R² Score: {r2_score(
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].Weekly_Sales,
+    df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
+):.4f}""")
+
+plot_time_series(
+    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
+    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
+    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
+    vline_x=train_dates.max(),
+    title="XGBoost for Store 1"
+)
+
 # %%
 # 10. MODEL EVALUATION AND COMPARISON
 # ============================================================================
@@ -794,29 +1040,14 @@ print("\n" + "="*70)
 print("MODEL COMPARISON: SCALED VS UNSCALED FEATURES")
 print("="*70)
 
-# For comparison, let's also train Linear Regression WITHOUT scaling
-print("\nTraining Linear Regression WITHOUT scaling for comparison...")
-lr_model_unscaled = LinearRegression()
-lr_model_unscaled.fit(X_train_baseline, y_train_baseline)
-y_train_pred_lr_unscaled = lr_model_unscaled.predict(X_train_baseline)
-y_test_pred_lr_unscaled = lr_model_unscaled.predict(X_test_baseline)
-
-mae_lr_unscaled = mean_absolute_error(y_train_baseline, y_train_pred_lr_unscaled)
-rmse_lr_unscaled = np.sqrt(mean_squared_error(y_train_baseline, y_train_pred_lr_unscaled))
-r2_lr_unscaled = r2_score(y_train_baseline, y_train_pred_lr_unscaled)
-
-mae_lr_unscaled_test = mean_absolute_error(y_test_baseline, y_test_pred_lr_unscaled)
-rmse_lr_unscaled_test = np.sqrt(mean_squared_error(y_test_baseline, y_test_pred_lr_unscaled))
-r2_lr_unscaled_test = r2_score(y_test_baseline, y_test_pred_lr_unscaled)
-
 # Create comparison dataframe
 comparison_df = pd.DataFrame({
-    'Model': ['LR Train (Unscaled)', 'LR Train (Scaled)', 
-              'LR Test (Unscaled)', 'LR Test (Scaled)',
+    'Model': ['LR Train (Scaled)', 'LR Test (Scaled)',
+              'Prophet Train', 'Prophet Test',  
               'XGBoost (Train)', 'XGBoost (Validation)', 'XGBoost (Test)'],
-    'MAE': [mae_lr_unscaled, mae_lr, mae_lr_unscaled_test, mae_lr_test, mae_xgb_train, mae_xgb_val, mae_xgb_test],
-    'RMSE': [rmse_lr_unscaled, rmse_lr, rmse_lr_unscaled_test, rmse_lr_test, rmse_xgb_train, rmse_xgb_val, rmse_xgb_test],
-    'R² Score': [r2_lr_unscaled, r2_lr, r2_lr_unscaled_test, r2_lr_test, r2_xgb_train, r2_xgb_val, r2_xgb_test]
+    'MAE': [mae_lr, mae_lr_test, mae_pr, mae_pr_test, mae_xgb_train, mae_xgb_val, mae_xgb_test],
+    'RMSE': [rmse_lr, rmse_lr_test, rmse_pr, rmse_pr_test, rmse_xgb_train, rmse_xgb_val, rmse_xgb_test],
+    'R² Score': [r2_lr, r2_lr_test, r2_pr, r2_pr_test, r2_xgb_train, r2_xgb_val, r2_xgb_test]
 })
 
 print("\n--- Model Performance Summary ---")
@@ -861,9 +1092,9 @@ print("\nGenerating prediction visualizations...")
 
 # For XGBoost on validation set
 prediction_viz_df = pd.DataFrame({
-    'Actual': baseline_test.Weekly_Sales,
+    'Actual': df_agg_store_test_1.Weekly_Sales,
     'Predicted': y_test_pred_xgb,
-    'Residual': baseline_test.Weekly_Sales - y_test_pred_xgb
+    'Residual': df_agg_store_test_1.Weekly_Sales - y_test_pred_xgb
 })
 
 # Actual vs Predicted scatter plot
@@ -914,3 +1145,4 @@ fig.update_layout(
     template='plotly_white'
 )
 fig.show()
+# %%
