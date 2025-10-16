@@ -64,7 +64,7 @@ print("STEP 2: DATA LOADING & INITIAL EXPLORATION")
 print("="*80)
 
 # Load the dataset
-df = pd.read_csv('./data/customer_churn_dataset-training-master.csv')
+df = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
 
 print(f"\n📊 Dataset Shape: {df.shape[0]} rows × {df.shape[1]} columns")
 print("\nFirst 5 rows:")
@@ -1045,7 +1045,7 @@ for model_type in ['LR', 'XGB', 'NN']:
 
 # %% Try with original testing data from kaggle
 # ---------------------------------------------------------------------------
-df_new = pd.read_csv("./data/customer_churn_dataset-testing-master.csv")
+df_new = pd.read_csv("./data/churn/customer_churn_dataset-testing-master.csv")
 # %%
 X_new = df_new.drop(["CustomerID", "Churn"], axis=1)
 # Encode categorical variables
@@ -1100,7 +1100,7 @@ lr_new = {
         'ROC-AUC': roc_auc_score(df_new["Churn"], lr_proba)
     }
 }
-# %%
+
 display(lr_new["metrics"])
 
 # %%

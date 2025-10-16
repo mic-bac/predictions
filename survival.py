@@ -61,7 +61,7 @@ print("✓ All libraries imported successfully!")
 # URL: https://www.kaggle.com/datasets/muhammadshahidazeem/customer-churn-dataset
 
 # For demonstration, let's assume the CSV is in the current directory
-df = pd.read_csv('./data/customer_churn_dataset-training-master.csv')
+df = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
 
 print("\n" + "="*80)
 print("DATASET OVERVIEW")
