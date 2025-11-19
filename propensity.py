@@ -1,8 +1,9 @@
 """
 ================================================================================
 CHURN PREDICTION USING PROPENSITY SCORES
-Big Data & Machine Learning Course
 ================================================================================
+Course: Big Data and Machine Learning
+Topic: Introduction to Propensity Scores with Python
 
 Learning Objectives:
 1. Understand propensity scores in the context of churn prediction
@@ -64,7 +65,13 @@ print("STEP 2: DATA LOADING & INITIAL EXPLORATION")
 print("="*80)
 
 # Load the dataset
-df = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
+df_train = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
+df_test = pd.read_csv("./data/churn/customer_churn_dataset-testing-master.csv")
+
+df = pd.concat([df_train, df_test]).reset_index(drop=True)
+df["CustomerID"] = range(len(df))
+
+# %%
 
 print(f"\n📊 Dataset Shape: {df.shape[0]} rows × {df.shape[1]} columns")
 print("\nFirst 5 rows:")
@@ -79,6 +86,8 @@ if missing.sum() == 0:
     print("  ✓ No missing values found!")
 else:
     print(missing[missing > 0])
+
+df.dropna(inplace=True)
 
 print("\n🎯 Target Variable (Churn) Distribution:")
 churn_counts = df['Churn'].value_counts()
@@ -378,9 +387,9 @@ print("Tuning Logistic Regression...")
 print("-" * 80)
 
 lr_param_grid = {
-    'C': [0.001, 0.01, 0.1, 1, 10, 100],
-    'penalty': ['l1', 'l2'],
-    'solver': ['liblinear', 'saga']
+    'C': [0.001, 0.01, 0.1, 1, 10, 100], # regularization to reduce overfitting
+    'penalty': ['l1', 'l2'],             # lasso or ridge regression to reduce overfitting
+    'solver': ['liblinear', 'saga']      # algorithm to find optimal coefficient
 }
 
 lr_grid = GridSearchCV(
@@ -529,35 +538,12 @@ best_model_name = comparison_df.loc['ROC-AUC'].idxmax()
 best_score = comparison_df.loc['ROC-AUC', best_model_name]
 print(f"\n🏆 Best Model: {best_model_name} (ROC-AUC: {best_score:.4f})")
 
-# %% Visualization 1: Metrics Comparison Bar Chart
-# ---------------------------------------------------------------------------
-fig_metrics = go.Figure()
 
+# %% Visualization: ROC Curves
+# ---------------------------------------------------------------------------
 model_order = ['LR_Default', 'LR_Tuned', 'XGB_Default', 'XGB_Tuned', 'NN_Default', 'NN_Tuned']
 colors = ['#3498db', '#2980b9', '#2ecc71', '#27ae60', '#e74c3c', '#c0392b']
 
-for idx, model in enumerate(model_order):
-    fig_metrics.add_trace(go.Bar(
-        name=model.replace('_', ' '),
-        x=comparison_df.index,
-        y=comparison_df[model],
-        text=comparison_df[model].round(3),
-        textposition='outside',
-        marker_color=colors[idx]
-    ))
-
-fig_metrics.update_layout(
-    title='<b>Model Performance Comparison: Default vs Tuned</b>',
-    xaxis_title='Metric',
-    yaxis_title='Score',
-    barmode='group',
-    height=500,
-    yaxis_range=[0, 1.1]
-)
-fig_metrics.show()
-
-# %% Visualization 2: ROC Curves
-# ---------------------------------------------------------------------------
 fig_roc = go.Figure()
 
 line_styles = [
@@ -597,7 +583,7 @@ fig_roc.update_layout(
 )
 fig_roc.show()
 
-# %% Visualization 3: Propensity Score Distributions
+# %% Visualization: Propensity Score Distributions
 # ---------------------------------------------------------------------------
 fig_prop = make_subplots(
     rows=2, cols=3,
@@ -649,55 +635,6 @@ fig_prop.update_layout(
 )
 fig_prop.show()
 
-# %% Visualization 4: Tuning Impact
-# ---------------------------------------------------------------------------
-tuning_impact = pd.DataFrame({
-    'Model': ['Logistic Regression', 'XGBoost', 'Neural Network'],
-    'Default': [
-        models_results['LR_Default']['metrics']['ROC-AUC'],
-        models_results['XGB_Default']['metrics']['ROC-AUC'],
-        models_results['NN_Default']['metrics']['ROC-AUC']
-    ],
-    'Tuned': [
-        models_results['LR_Tuned']['metrics']['ROC-AUC'],
-        models_results['XGB_Tuned']['metrics']['ROC-AUC'],
-        models_results['NN_Tuned']['metrics']['ROC-AUC']
-    ]
-})
-tuning_impact['Improvement'] = tuning_impact['Tuned'] - tuning_impact['Default']
-
-fig_impact = go.Figure()
-fig_impact.add_trace(go.Bar(
-    name='Default',
-    x=tuning_impact['Model'],
-    y=tuning_impact['Default'],
-    marker_color='#95a5a6',
-    text=tuning_impact['Default'].round(4),
-    textposition='outside'
-))
-fig_impact.add_trace(go.Bar(
-    name='Tuned',
-    x=tuning_impact['Model'],
-    y=tuning_impact['Tuned'],
-    marker_color='#3498db',
-    text=tuning_impact['Tuned'].round(4),
-    textposition='outside'
-))
-
-fig_impact.update_layout(
-    title='<b>Impact of Hyperparameter Tuning (ROC-AUC)</b>',
-    xaxis_title='Model Type',
-    yaxis_title='ROC-AUC Score',
-    barmode='group',
-    height=500,
-    yaxis_range=[0.5, 1.0]
-)
-fig_impact.show()
-
-print("\n" + "-" * 80)
-print("Tuning Impact Summary:")
-for _, row in tuning_impact.iterrows():
-    print(f"  {row['Model']:20s}: {row['Default']:.4f} → {row['Tuned']:.4f} ({row['Improvement']:+.4f})")
 
 # %% Feature Importance (Top Models)
 # ---------------------------------------------------------------------------
@@ -1040,67 +977,3 @@ for model_type in ['LR', 'XGB', 'NN']:
     model_name = {'LR': 'Logistic Regression', 'XGB': 'XGBoost', 'NN': 'Neural Network'}[model_type]
     print(f"{model_name:20s}: {default_auc:.4f} → {tuned_auc:.4f} "
           f"(+{improvement:.4f}, +{pct_improvement:.1f}%)")
-
-
-
-# %% Try with original testing data from kaggle
-# ---------------------------------------------------------------------------
-df_new = pd.read_csv("./data/churn/customer_churn_dataset-testing-master.csv")
-# %%
-X_new = df_new.drop(["CustomerID", "Churn"], axis=1)
-# Encode categorical variables
-print("\n🔄 Encoding categorical variables...")
-label_encoders = {}
-for col in X_new.select_dtypes(include=['object']).columns.tolist():
-    le = LabelEncoder()
-    X_new[col] = le.fit_transform(X_new[col])
-    label_encoders[col] = le
-
-# %% try with tuned XGBoost model
-xgb_tuned_pred_new = xgb_tuned.predict(X_new)
-xgb_tuned_proba_new = xgb_tuned.predict_proba(X_new)[:, 1]
-
-xgb_new = {
-    'model': xgb_tuned,
-    'predictions': xgb_tuned_pred_new,
-    'probabilities': xgb_tuned_proba_new,
-    'metrics': {
-        'Accuracy': accuracy_score(df_new["Churn"], xgb_tuned_pred_new),
-        'Precision': precision_score(df_new["Churn"], xgb_tuned_pred_new),
-        'Recall': recall_score(df_new["Churn"], xgb_tuned_pred_new),
-        'F1-Score': f1_score(df_new["Churn"], xgb_tuned_pred_new),
-        'ROC-AUC': roc_auc_score(df_new["Churn"], xgb_tuned_proba_new)
-    },
-    'best_params': xgb_random.best_params_,
-    'cv_score': xgb_random.best_score_
-}
-
-# %%
-display(xgb_new["metrics"])
-
-
-
-# %% try with Logistic Regression model
-X_new_scaled = scaler.fit_transform(X_new)
-# %%
-lr_pred = lr_tuned.predict(X_new_scaled)
-lr_proba = lr_tuned.predict_proba(X_new_scaled)[:, 1]
-
-lr_pred = lr_model.predict(X_new_scaled)
-lr_proba = lr_model.predict_proba(X_new_scaled)[:, 1]
-
-lr_new = {
-    'predictions': lr_pred,
-    'probabilities': lr_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(df_new["Churn"], lr_pred),
-        'Precision': precision_score(df_new["Churn"], lr_pred),
-        'Recall': recall_score(df_new["Churn"], lr_pred),
-        'F1-Score': f1_score(df_new["Churn"], lr_pred),
-        'ROC-AUC': roc_auc_score(df_new["Churn"], lr_proba)
-    }
-}
-
-display(lr_new["metrics"])
-
-# %%
