@@ -63,17 +63,17 @@ print(f"Features shape: {features_df.shape}")
 
 # Display sample data
 print("\n--- Sample Training Data ---")
-print(train_df.head())
+display(train_df.head())
 print("\n--- Train Data Info ---")
 print(train_df.info())
 print("\n--- Train Data Statistics ---")
-print(train_df.describe())
+display(train_df.describe())
 
 print("\n--- Stores Data ---")
-print(stores_df.head())
+display(stores_df.head())
 
 print("\n--- Features Data (First Few Rows) ---")
-print(features_df.head())
+display(features_df.head())
 
 # %%
 # 2. DATA PREPARATION AND MERGING
@@ -140,10 +140,13 @@ print(f"Train missing values: {train_merged.isnull().sum().sum()}")
 # ============================================================================
 # Visualizing key patterns and distributions in the data
 
+# aggregate on store level to make visual more meaningful
+train_merged_eda = train_merged.groupby(["Store", "Date", "IsHoliday", "Type"])["Weekly_Sales"].sum().reset_index()
+
 # 4.1: Distribution of weekly sales
 fig = go.Figure()
 fig.add_trace(go.Histogram(
-    x=train_merged['Weekly_Sales'],
+    x=train_merged_eda['Weekly_Sales'],
     nbinsx=50,
     name='Weekly Sales',
     marker_color='royalblue'
@@ -158,7 +161,7 @@ fig.update_layout(
 fig.show()
 
 # 4.2: Sales trend over time (aggregated)
-sales_by_date = train_merged.groupby('Date')['Weekly_Sales'].sum().reset_index()
+sales_by_date = train_merged_eda.groupby('Date')['Weekly_Sales'].sum().reset_index()
 fig = go.Figure()
 fig.add_trace(go.Scatter(
     x=sales_by_date['Date'],
@@ -178,13 +181,13 @@ fig.update_layout(
 fig.show()
 
 # 4.3: Holiday impact on sales
-holiday_impact = train_merged.groupby('IsHoliday')['Weekly_Sales'].agg(['mean', 'median', 'std'])
+holiday_impact = train_merged_eda.groupby('IsHoliday')['Weekly_Sales'].agg(['mean', 'median', 'std'])
 print("\n--- Holiday Impact on Sales ---")
 print(holiday_impact)
 
 fig = go.Figure()
 for is_holiday in [True, False]:
-    data = train_merged[train_merged['IsHoliday'] == is_holiday]['Weekly_Sales']
+    data = train_merged_eda[train_merged_eda['IsHoliday'] == is_holiday]['Weekly_Sales']
     fig.add_trace(go.Box(
         y=data,
         name='Holiday' if is_holiday else 'Non-Holiday',
@@ -199,11 +202,11 @@ fig.update_layout(
 fig.show()
 
 # 4.4: Store type analysis
-store_type_sales = train_merged.groupby('Type')['Weekly_Sales'].agg(['mean', 'median'])
+store_type_sales = train_merged_eda.groupby('Type')['Weekly_Sales'].agg(['mean', 'median'])
 print("\n--- Sales by Store Type ---")
 print(store_type_sales)
 
-fig = px.box(train_merged, x='Type', y='Weekly_Sales', 
+fig = px.box(train_merged_eda, x='Type', y='Weekly_Sales', 
              title='Weekly Sales Distribution by Store Type',
              labels={'Type': 'Store Type', 'Weekly_Sales': 'Sales'})
 fig.update_layout(height=500, template='plotly_white')
@@ -506,7 +509,7 @@ plot_time_series(
 
 
 # %%
-# 8. PROPHET MODEL: TIME SERIES FORECASTING
+# 8. PROPHET MODEL: TIME SERIES FORECASTING for Store 1 only
 # ============================================================================
 # Facebook Prophet is designed for time series with seasonality and trends
 
@@ -526,6 +529,7 @@ prophet_test = prophet_test.rename(columns={'Date': 'ds', 'Weekly_Sales': 'y'})
 prophet_df = prophet_train.rename(columns={'Date': 'ds', 'Weekly_Sales': 'y'})
 prophet_predict = pd.concat([prophet_df, prophet_test], axis=0).reset_index(drop=True)
 
+# Aggregate on Store Level
 prophet_df = prophet_df.groupby(
     [
         'Store', 'ds', 'Size', 'Temperature',
@@ -577,6 +581,7 @@ for col in ['Temperature', 'Fuel_Price', 'CPI', 'Unemployment',
 # Add holiday effects
 prophet_model.add_country_holidays(country_name='US')
 
+# Fit on Store 1
 prophet_model.fit(prophet_df[prophet_df.Store == 1])
 print("Prophet model training complete!")
 
@@ -900,13 +905,6 @@ print(f"""  R² Score: {r2_score(
     df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
 ):.4f}""")
 
-plot_time_series(
-    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
-    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
-    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
-    vline_x=train_dates.max(),
-    title="XGBoost for all Stores"
-)
 
 # %% 9.2 XGBOOST MODEL: GRADIENT BOOSTING REGRESSION on Store 1 only
 # ============================================================================
@@ -974,9 +972,8 @@ plot_time_series(
     y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
     yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
     vline_x=train_dates.max(),
-    title="XGBoost for all Stores and Dept"
+    title="XGBoost for Store 1 only"
 )
-
 
 
 # Calculate metrics
@@ -1023,13 +1020,6 @@ print(f"""  R² Score: {r2_score(
     df_plot_ygrp[(df_plot_ygrp.Store == 1) & (df_plot_ygrp.Date > train_dates.max())].yhat
 ):.4f}""")
 
-plot_time_series(
-    x=df_plot_ygrp[df_plot_ygrp.Store == 1].Date.values, 
-    y=df_plot_ygrp[df_plot_ygrp.Store == 1].Weekly_Sales.values, 
-    yhat=df_plot_ygrp[df_plot_ygrp.Store == 1].yhat.values,
-    vline_x=train_dates.max(),
-    title="XGBoost for Store 1"
-)
 
 # %%
 # 10. MODEL EVALUATION AND COMPARISON
@@ -1052,14 +1042,6 @@ comparison_df = pd.DataFrame({
 
 print("\n--- Model Performance Summary ---")
 print(comparison_df.to_string(index=False))
-
-print("\nOBSERVATIONS:")
-print(f"✓ Scaled vs Unscaled LR: Performance is IDENTICAL")
-print(f"  (Linear Regression minimizes the same loss function)")
-print(f"✓ But scaled features have better interpretability:")
-print(f"  Coefficients are comparable on same scale")
-print(f"✓ XGBoost needs NO scaling (tree-based model)")
-print(f"  Same performance regardless of feature scale")
 
 # Visualize model comparison
 fig = make_subplots(
