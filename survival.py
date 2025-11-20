@@ -37,7 +37,6 @@ Unlike binary classification (churned/not churned), survival analysis:
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
-import plotly.express as px
 from plotly.subplots import make_subplots
 
 # Survival analysis libraries
@@ -61,7 +60,11 @@ print("✓ All libraries imported successfully!")
 # URL: https://www.kaggle.com/datasets/muhammadshahidazeem/customer-churn-dataset
 
 # For demonstration, let's assume the CSV is in the current directory
-df = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
+df_train = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
+df_test = pd.read_csv("./data/churn/customer_churn_dataset-testing-master.csv")
+
+df = pd.concat([df_train, df_test]).reset_index(drop=True)
+df["CustomerID"] = range(len(df))
 
 print("\n" + "="*80)
 print("DATASET OVERVIEW")
@@ -99,12 +102,8 @@ df_survival = df.copy()
 # Handle any missing values
 df_survival = df_survival.dropna()
 
-# Handle the churn column (convert to binary if needed)
-# Assuming 'Churn' column exists with values 0/1 or Yes/No
-if df_survival['Churn'].dtype == 'object':
-    df_survival['event'] = (df_survival['Churn'] == 'Yes').astype(int)
-else:
-    df_survival['event'] = df_survival['Churn'].astype(int)
+# To fit survival analysis wording, we call "churn" --> "event"
+df_survival['event'] = df_survival['Churn'].astype(int)
 
 # For time, we'll use 'Tenure' (months with the company)
 # If tenure doesn't exist, we might need to calculate it
@@ -350,7 +349,7 @@ print("="*80)
 # Similar to AUC-ROC, ranges from 0.5 (random) to 1.0 (perfect)
 # Measures how well the model ranks survival times
 
-print("\n8.1 Concordance Index (C-index)")
+print("\n8.1 Concordance Index (C-index) - Values > 0.7 are acceptable, > 0.8 are good")
 print("-" * 50)
 
 results = []
