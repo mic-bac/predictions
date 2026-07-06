@@ -1,0 +1,24 @@
+[project]
+name = "predictions"
+version = "0.1.0"
+description = "Prediction / survival / forecasting teaching examples."
+requires-python = ">=3.13"
+dependencies = [
+    "pandas",
+    "numpy",
+    "scikit-learn",
+    "scikit-survival",  # compiled extension; wheels available for cp310
+    "xgboost",
+    "prophet",          # bundles Stan; wheels available for cp310
+    "statsmodels",
+    "plotly",
+]
+
+[dependency-groups]
+dev = [
+    "ipykernel",
+    "nbformat",
+]
+
+[tool.uv]
+package = false

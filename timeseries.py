@@ -38,7 +38,7 @@ import xgboost as xgb
 from statsmodels.tsa.seasonal import seasonal_decompose
 
 # Install plotting function
-from src.utils.ts_plot import plot_time_series
+from fh.predictions.src.utils.ts_plot import plot_time_series
 
 # %%
 # 1. DATA LOADING AND EXPLORATION
