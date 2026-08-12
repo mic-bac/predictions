@@ -1,979 +1,580 @@
 """
-================================================================================
-CHURN PREDICTION USING PROPENSITY SCORES
-================================================================================
+==============================================================================
+PROPENSITY MODELS — LOOK-ALIKE MODELING FOR CHURN
+==============================================================================
 Course: Big Data and Machine Learning
-Topic: Introduction to Propensity Scores with Python
+Topic: Propensity / look-alike modeling with Python
 
-Learning Objectives:
-1. Understand propensity scores in the context of churn prediction
-2. Learn complete ML workflow: preparation → modeling → tuning → deployment
-3. Build and compare three different ML approaches (linear, tree, neural)
-4. Apply hyperparameter tuning and cross-validation
-5. Translate ML results into business recommendations
+Business question
+-----------------
+"Acquiring and retaining customers costs money — who should we talk to?"
 
-What are Propensity Scores?
----------------------------
-In churn prediction, a propensity score is the probability (0-1) that a 
-customer will churn based on their characteristics. These scores help:
-- Identify high-risk customers for targeted retention campaigns
-- Prioritize limited resources efficiently
-- Understand which factors drive customer attrition
+A **propensity model** answers that by estimating, for every single customer,
+the probability that they perform a behaviour we care about: buying, accepting
+an offer, or — here — churning. Because we have *labelled history* (we know who
+churned), this is **supervised classification**.
 
-Dataset: Customer Churn Dataset from Kaggle
-https://www.kaggle.com/datasets/muhammadshahidazeem/customer-churn-dataset
-================================================================================
+Look-alike modeling
+-------------------
+We train on profiles that already showed the behaviour change, then look for
+present-day customers with similar features ("look-alikes") who are likely to
+show it next.
+
+Learning objectives
+-------------------
+1. Frame churn as a look-alike problem, including the time-window design
+2. Build and compare three model families (linear / tree / neural)
+3. Generalise with cross-validation and tune with Grid/RandomizedSearchCV
+4. Judge a classifier with the right metrics (not just accuracy)
+5. Diagnose under-/overfitting with learning and validation curves
+6. Turn propensity scores into targetable risk segments
+
+Run it
+------
+    uv sync
+    uv run python propensity.py
+
+Dataset: https://www.kaggle.com/datasets/muhammadshahidazeem/customer-churn-dataset
+==============================================================================
 """
 
-# %% 1. IMPORT LIBRARIES
-# ============================================================================
+# %% 1. SETUP
+# ==============================================================================
 
-import pandas as pd
+import sys
+from pathlib import Path
+
 import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
-
-# Machine Learning
-from sklearn.model_selection import train_test_split, GridSearchCV, RandomizedSearchCV, cross_val_score
-from sklearn.preprocessing import StandardScaler, LabelEncoder
 from sklearn.linear_model import LogisticRegression
-from sklearn.neural_network import MLPClassifier
 from sklearn.metrics import (
-    accuracy_score, precision_score, recall_score, f1_score,
-    roc_auc_score, roc_curve, confusion_matrix, classification_report
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
 )
+from sklearn.model_selection import (
+    GridSearchCV,
+    RandomizedSearchCV,
+    StratifiedKFold,
+    cross_val_score,
+    learning_curve,
+    train_test_split,
+    validation_curve,
+)
+from sklearn.neural_network import MLPClassifier
+from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
-print("✓ All libraries imported successfully!")
-print("\nNotebook Structure:")
-print("  1. Import Libraries")
-print("  2. Load & Explore Data")
-print("  3. Data Preparation")
-print("  4. Exploratory Data Analysis")
-print("  5. Build Baseline Models (3 types)")
-print("  6. Hyperparameter Tuning")
-print("  7. Comprehensive Model Comparison")
-print("  8. Business Insights & Deployment")
-print("\n" + "="*80 + "\n")
+# Make `src/` importable no matter where this script is launched from.
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+from src.churn_data import encode_features, load_churn  # noqa: E402
 
-# %% 2. LOAD AND EXPLORE DATA
-# ============================================================================
+# How many customers to model. The full dataset is ~505,000 rows; a
+# GridSearchCV over that takes hours. 20,000 keeps every result in this script
+# under a minute while the conclusions stay the same. Set to None for all data.
+SAMPLE_SIZE = 20_000
+RANDOM_STATE = 42
 
-print("="*80)
-print("STEP 2: DATA LOADING & INITIAL EXPLORATION")
-print("="*80)
+df = load_churn(sample_size=SAMPLE_SIZE, random_state=RANDOM_STATE)
 
-# Load the dataset
-df_train = pd.read_csv('./data/churn/customer_churn_dataset-training-master.csv')
-df_test = pd.read_csv("./data/churn/customer_churn_dataset-testing-master.csv")
+print("=" * 78)
+print("PROPENSITY MODELS — LOOK-ALIKE MODELING FOR CHURN")
+print("=" * 78)
+print(f"\nCustomers: {len(df):,}   Columns: {df.shape[1]}")
+print(f"Churn rate: {df['Churn'].mean() * 100:.1f}%")
+print(f"\n{df.head()}")
 
-df = pd.concat([df_train, df_test]).reset_index(drop=True)
-df["CustomerID"] = range(len(df))
+# %% 2. THE LOOK-ALIKE SETUP (why time matters)
+# ==============================================================================
+# The single most common way a propensity model fails is not a bad algorithm —
+# it is a leaky time design. A profile is built from an OBSERVATION period, and
+# the label comes from a later OUTCOME period:
+#
+#     |---- observation ----|-- buffer --|-- outcome --|
+#      features are built        gap        label is read
+#            here             (lead time)      here
+#
+# * Observation period: everything the model is allowed to see (usage, support
+#   calls, spend). Only data from *before* the cut-off.
+# * Buffer: the lead time your business actually needs. If the retention team
+#   needs two weeks to act, a model that predicts churn one day ahead is
+#   worthless. The buffer also protects against label leakage — the last days
+#   before a cancellation are full of give-away signals (cancelled auto-renew,
+#   a "how do I close my account" ticket).
+# * Outcome period: the window in which the event counts as a "yes".
+#
+# The same profile is then scored for a *different* customer in the *future* —
+# that is the extra complexity a plain classification exercise does not have.
+#
+# This Kaggle table is already aggregated to one row per customer, so the
+# windows are baked in rather than something we can slide. We name them anyway,
+# because on real data defining them is the first task, not an afterthought.
 
-# %%
-
-print(f"\n📊 Dataset Shape: {df.shape[0]} rows × {df.shape[1]} columns")
-print("\nFirst 5 rows:")
-print(df.head())
-
-print("\n📋 Column Information:")
-print(df.info())
-
-print("\n🔍 Missing Values Check:")
-missing = df.isnull().sum()
-if missing.sum() == 0:
-    print("  ✓ No missing values found!")
-else:
-    print(missing[missing > 0])
-
-df.dropna(inplace=True)
-
-print("\n🎯 Target Variable (Churn) Distribution:")
-churn_counts = df['Churn'].value_counts()
-churn_rate = df['Churn'].mean() * 100
-print(f"  No Churn (0): {churn_counts[0]} ({100-churn_rate:.1f}%)")
-print(f"  Churn (1):    {churn_counts[1]} ({churn_rate:.1f}%)")
+print("\n" + "-" * 78)
+print("LOOK-ALIKE WINDOWS (illustrative)")
+print("-" * 78)
+for name, weeks, role in [
+    ("Observation", 12, "build features from behaviour in this window"),
+    ("Buffer", 2, "lead time to act + protection against label leakage"),
+    ("Outcome", 4, "did the customer churn in this window? -> label"),
+]:
+    print(f"  {name:<12} {weeks:>3} weeks   {role}")
 
 # %% 3. DATA PREPARATION
-# ============================================================================
+# ==============================================================================
+# Feature quality decides more than algorithm choice. Features can be
+# socio-demographic (Age, Gender), behavioural (Usage Frequency, Support Calls),
+# or commercial (Total Spend, Contract Length) — this dataset has all three.
 
-print("\n" + "="*80)
-print("STEP 3: DATA PREPARATION")
-print("="*80)
+X, y, encoders = encode_features(df)
 
-# Remove row with NaN in CustomerID
-df.dropna(subset="CustomerID", inplace=True)
+print("\n" + "-" * 78)
+print("FEATURES")
+print("-" * 78)
+print(f"  {X.shape[1]} features, {X.shape[0]:,} rows")
+print(f"  Label-encoded categoricals: {list(encoders)}")
 
-# Create working copy
-data = df.copy()
-
-# Identify feature types
-categorical_cols = data.select_dtypes(include=['object']).columns.tolist()
-numerical_cols = data.select_dtypes(include=['int64', 'float64']).columns.tolist()
-
-# Remove target from feature lists
-if 'Churn' in categorical_cols:
-    categorical_cols.remove('Churn')
-if 'Churn' in numerical_cols:
-    numerical_cols.remove('Churn')
-
-print(f"\n📊 Feature Types:")
-print(f"  Categorical: {len(categorical_cols)} features")
-print(f"  Numerical:   {len(numerical_cols)} features")
-
-# Encode categorical variables
-print("\n🔄 Encoding categorical variables...")
-label_encoders = {}
-for col in categorical_cols:
-    le = LabelEncoder()
-    data[col] = le.fit_transform(data[col])
-    label_encoders[col] = le
-print(f"  ✓ Encoded {len(categorical_cols)} categorical features")
-
-# Prepare features and target
-X = data.drop('Churn', axis=1)
-y = data['Churn']
-
-# Train-test split (80-20, stratified)
+# Stratified split keeps the churn rate identical in train and test, so the
+# test score measures the model and not an accident of sampling.
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y
+    X, y, test_size=0.2, random_state=RANDOM_STATE, stratify=y
 )
-# Remove ID, as it is not a valid predictor
-X_train_id = X_train["CustomerID"]
-X_train.drop("CustomerID", axis=1, inplace=True)
 
-X_test_id = X_test["CustomerID"]
-X_test.drop("CustomerID", axis=1, inplace=True)
-
-print(f"\n📦 Data Split:")
-print(f"  Training:   {X_train.shape[0]} samples ({y_train.mean()*100:.1f}% churn)")
-print(f"  Testing:    {X_test.shape[0]} samples ({y_test.mean()*100:.1f}% churn)")
-
-# Standardize features (required for LR and NN, not for XGBoost)
+# Logistic regression and neural nets are distance/gradient based and need
+# comparable scales; trees split on thresholds and do not care.
 scaler = StandardScaler()
 X_train_scaled = scaler.fit_transform(X_train)
 X_test_scaled = scaler.transform(X_test)
-print(f"  ✓ Features standardized (mean=0, std=1)")
+
+print(f"  Train: {len(X_train):,} ({y_train.mean() * 100:.1f}% churn)")
+print(f"  Test:  {len(X_test):,} ({y_test.mean() * 100:.1f}% churn)")
 
 # %% 4. EXPLORATORY DATA ANALYSIS
-# ============================================================================
+# ==============================================================================
 
-print("\n" + "="*80)
-print("STEP 4: EXPLORATORY DATA ANALYSIS")
-print("="*80)
-
-# Visualization 1: Churn Distribution
 fig_churn = px.pie(
-    df, 
-    names='Churn', 
-    title='<b>Customer Churn Distribution</b>',
-    color='Churn',
-    color_discrete_map={0: '#2ecc71', 1: '#e74c3c'},
-    hole=0.3
+    df,
+    names="Churn",
+    title="<b>Churn distribution</b>",
+    color="Churn",
+    color_discrete_map={0: "#2ecc71", 1: "#e74c3c"},
+    hole=0.35,
 )
-fig_churn.update_traces(textinfo='percent+label', textfont_size=14)
+fig_churn.update_traces(textinfo="percent+label")
 fig_churn.show()
 
-# Visualization 2: Feature Distributions by Churn
-key_features = numerical_cols[:4] if len(numerical_cols) >= 4 else numerical_cols
-
-fig_dist = make_subplots(
-    rows=2, cols=2,
-    subplot_titles=[f'<b>{feat}</b>' for feat in key_features]
-)
-
+key_features = ["Support Calls", "Payment Delay", "Total Spend", "Last Interaction"]
+fig_dist = make_subplots(rows=2, cols=2, subplot_titles=[f"<b>{f}</b>" for f in key_features])
 for i, feat in enumerate(key_features):
     row, col = (i // 2) + 1, (i % 2) + 1
-    
-    fig_dist.add_trace(
-        go.Histogram(x=df[df['Churn']==0][feat], name='No Churn', 
-                     marker_color='#2ecc71', opacity=0.7, 
-                     legendgroup='g1', showlegend=(i==0)),
-        row=row, col=col
-    )
-    fig_dist.add_trace(
-        go.Histogram(x=df[df['Churn']==1][feat], name='Churn', 
-                     marker_color='#e74c3c', opacity=0.7,
-                     legendgroup='g2', showlegend=(i==0)),
-        row=row, col=col
-    )
-
-fig_dist.update_layout(
-    title_text='<b>Feature Distributions by Churn Status</b>',
-    height=600, barmode='overlay'
-)
+    for churned, label, color in [(0, "Stayed", "#2ecc71"), (1, "Churned", "#e74c3c")]:
+        fig_dist.add_trace(
+            go.Histogram(
+                x=df.loc[df["Churn"] == churned, feat],
+                name=label,
+                marker_color=color,
+                opacity=0.7,
+                legendgroup=label,
+                showlegend=(i == 0),
+            ),
+            row=row,
+            col=col,
+        )
+fig_dist.update_layout(title_text="<b>Feature distributions by churn status</b>", barmode="overlay", height=600)
 fig_dist.show()
 
-# Visualization 3: Correlation Heatmap
-correlation = data.corr()
+churn_corr = X.corrwith(y).sort_values(ascending=False)
+print("\n" + "-" * 78)
+print("CORRELATION WITH CHURN (a first, linear-only hint at what matters)")
+print("-" * 78)
+for feat, corr in pd.concat([churn_corr.head(4), churn_corr.tail(4)]).items():
+    print(f"  {feat:<22} {corr:+.4f}")
 
-fig_corr = go.Figure(data=go.Heatmap(
-    z=correlation.values,
-    x=correlation.columns,
-    y=correlation.columns,
-    colorscale='RdBu_r',
-    zmid=0,
-    text=np.round(correlation.values, 2),
-    texttemplate='%{text}',
-    textfont={"size": 8}
-))
+# %% 5. BASELINE MODELS
+# ==============================================================================
+# Three families, three trade-offs (slide: "Auswahl des besten Classification-
+# Algorithmus"). All three expose predict_proba — essential here, because a
+# look-alike model needs the *probability*, not just the predicted class.
+#
+#   Logistic Regression  linear, interpretable coefficients, fast
+#   XGBoost              trees + boosting, captures interactions, strong default
+#   Neural Network       flexible, needs the most data and tuning, opaque
 
-fig_corr.update_layout(
-    title='<b>Feature Correlation Matrix</b>',
-    width=900, height=800
-)
-fig_corr.show()
 
-# Top correlations with churn
-churn_corr = correlation['Churn'].drop('Churn').sort_values(ascending=False)
-print("\n🔗 Top 10 Features Correlated with Churn (5 pos, 5 neg):")
-for i, (feat, corr) in enumerate(churn_corr.head(5).items(), 1):
-    print(f"  {i:2d}. {feat:30s} {corr:+.4f}")
-for i, (feat, corr) in enumerate(churn_corr.tail(5).items(), 1):
-    print(f"  {i:2d}. {feat:30s} {corr:+.4f}")
+def evaluate(name, model, X_fit, y_fit, X_eval, y_eval):
+    """Fit a classifier and return one row of results.
 
-# %% 5. BASELINE MODELS (NO TUNING)
-# ============================================================================
-
-print("\n" + "="*80)
-print("STEP 5: BASELINE MODELS (DEFAULT PARAMETERS)")
-print("="*80)
-print("Building three model types to establish baselines:\n")
-
-# Dictionary to store all results
-models_results = {}
-
-# %% 5.1 Logistic Regression
-# ---------------------------------------------------------------------------
-print("-" * 80)
-print("MODEL 1: LOGISTIC REGRESSION")
-print("-" * 80)
-print("Linear model that predicts probabilities. Interpretable and fast.")
-
-lr_model = LogisticRegression(random_state=42, max_iter=1000)
-lr_model.fit(X_train_scaled, y_train)
-
-lr_pred = lr_model.predict(X_test_scaled)
-lr_pred_proba = lr_model.predict_proba(X_test_scaled)[:, 1]
-
-models_results['LR_Default'] = {
-    'model': lr_model,
-    'predictions': lr_pred,
-    'probabilities': lr_pred_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, lr_pred),
-        'Precision': precision_score(y_test, lr_pred),
-        'Recall': recall_score(y_test, lr_pred),
-        'F1-Score': f1_score(y_test, lr_pred),
-        'ROC-AUC': roc_auc_score(y_test, lr_pred_proba)
+    One helper for every model keeps the comparison honest: identical data,
+    identical metrics, identical thresholds.
+    """
+    model.fit(X_fit, y_fit)
+    probabilities = model.predict_proba(X_eval)[:, 1]
+    predictions = (probabilities >= 0.5).astype(int)
+    return {
+        "name": name,
+        "model": model,
+        "probabilities": probabilities,
+        "predictions": predictions,
+        "metrics": {
+            "Accuracy": accuracy_score(y_eval, predictions),
+            "Precision": precision_score(y_eval, predictions, zero_division=0),
+            "Recall": recall_score(y_eval, predictions, zero_division=0),
+            "F1-Score": f1_score(y_eval, predictions, zero_division=0),
+            "ROC-AUC": roc_auc_score(y_eval, probabilities),
+            "PR-AUC": average_precision_score(y_eval, probabilities),
+        },
     }
-}
 
-print("\n✓ Performance:")
-for metric, value in models_results['LR_Default']['metrics'].items():
-    print(f"  {metric:12s}: {value:.4f}")
 
-cm = confusion_matrix(y_test, lr_pred)
-print("\nConfusion Matrix:")
-print(f"  TN: {cm[0,0]:5d}  |  FP: {cm[0,1]:5d}")
-print(f"  FN: {cm[1,0]:5d}  |  TP: {cm[1,1]:5d}")
+results = {}
 
-# %% 5.2 XGBoost
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("MODEL 2: XGBOOST (GRADIENT BOOSTING TREES)")
-print("-" * 80)
-print("Ensemble of decision trees. Powerful for complex patterns.")
-
-xgb_model = xgb.XGBClassifier(
-    random_state=42, eval_metric='logloss',
-    max_depth=2, learning_rate=0.01, n_estimators=100
+results["LR_Default"] = evaluate(
+    "Logistic Regression",
+    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+    X_train_scaled,
+    y_train,
+    X_test_scaled,
+    y_test,
 )
-xgb_model.fit(X_train, y_train)
-
-xgb_pred = xgb_model.predict(X_test)
-xgb_pred_proba = xgb_model.predict_proba(X_test)[:, 1]
-
-models_results['XGB_Default'] = {
-    'model': xgb_model,
-    'predictions': xgb_pred,
-    'probabilities': xgb_pred_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, xgb_pred),
-        'Precision': precision_score(y_test, xgb_pred),
-        'Recall': recall_score(y_test, xgb_pred),
-        'F1-Score': f1_score(y_test, xgb_pred),
-        'ROC-AUC': roc_auc_score(y_test, xgb_pred_proba)
-    }
-}
-
-print("\n✓ Performance:")
-for metric, value in models_results['XGB_Default']['metrics'].items():
-    print(f"  {metric:12s}: {value:.4f}")
-
-cm = confusion_matrix(y_test, xgb_pred)
-print("\nConfusion Matrix:")
-print(f"  TN: {cm[0,0]:5d}  |  FP: {cm[0,1]:5d}")
-print(f"  FN: {cm[1,0]:5d}  |  TP: {cm[1,1]:5d}")
-
-# %% 5.3 Neural Network
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("MODEL 3: NEURAL NETWORK (MULTI-LAYER PERCEPTRON)")
-print("-" * 80)
-print("Deep learning with 2 hidden layers [32, 16]. Flexible but less interpretable.")
-
-nn_model = MLPClassifier(
-    hidden_layer_sizes=(32, 16), activation='relu', solver='adam',
-    learning_rate_init=0.2, alpha=0.1, random_state=42, 
-    max_iter=100, early_stopping=True
+results["XGB_Default"] = evaluate(
+    "XGBoost",
+    xgb.XGBClassifier(
+        random_state=RANDOM_STATE, eval_metric="logloss", max_depth=2, learning_rate=0.01, n_estimators=100
+    ),
+    X_train,  # trees need no scaling
+    y_train,
+    X_test,
+    y_test,
 )
-nn_model.fit(X_train_scaled, y_train)
+results["NN_Default"] = evaluate(
+    "Neural Network",
+    MLPClassifier(
+        hidden_layer_sizes=(32, 16),
+        activation="relu",
+        alpha=0.1,
+        random_state=RANDOM_STATE,
+        max_iter=200,
+        early_stopping=True,
+    ),
+    X_train_scaled,
+    y_train,
+    X_test_scaled,
+    y_test,
+)
 
-nn_pred = nn_model.predict(X_test_scaled)
-nn_pred_proba = nn_model.predict_proba(X_test_scaled)[:, 1]
+print("\n" + "=" * 78)
+print("BASELINE COMPARISON (untuned)")
+print("=" * 78)
+print(pd.DataFrame({k: v["metrics"] for k, v in results.items()}).round(4))
 
-models_results['NN_Default'] = {
-    'model': nn_model,
-    'predictions': nn_pred,
-    'probabilities': nn_pred_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, nn_pred),
-        'Precision': precision_score(y_test, nn_pred),
-        'Recall': recall_score(y_test, nn_pred),
-        'F1-Score': f1_score(y_test, nn_pred),
-        'ROC-AUC': roc_auc_score(y_test, nn_pred_proba)
-    }
-}
+# %% 6. GENERALISATION: CROSS-VALIDATION
+# ==============================================================================
+# A single train/test split is one draw of a random variable. k-fold CV trains
+# and tests k times and averages, which is a far more stable estimate. Stratified
+# folds preserve the class ratio in every fold — mandatory for imbalanced data.
 
-print("\n✓ Performance:")
-for metric, value in models_results['NN_Default']['metrics'].items():
-    print(f"  {metric:12s}: {value:.4f}")
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
+cv_scores = cross_val_score(
+    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+    X_train_scaled,
+    y_train,
+    cv=cv,
+    scoring="roc_auc",
+)
 
-cm = confusion_matrix(y_test, nn_pred)
-print("\nConfusion Matrix:")
-print(f"  TN: {cm[0,0]:5d}  |  FP: {cm[0,1]:5d}")
-print(f"  FN: {cm[1,0]:5d}  |  TP: {cm[1,1]:5d}")
+print("\n" + "-" * 78)
+print("5-FOLD STRATIFIED CV — Logistic Regression")
+print("-" * 78)
+for i, score in enumerate(cv_scores, 1):
+    print(f"  Fold {i}: ROC-AUC {score:.4f}")
+print(f"  Mean {cv_scores.mean():.4f} ± {cv_scores.std():.4f}  <- report this, not one lucky split")
 
-# %% 5.4 Comparison of all 3 model results
-# ---------------------------------------------------------------------------
-
-print("\n" + "="*80)
-print("📊 BASELINE COMPARISON")
-print("="*80)
-
-baseline_df = pd.DataFrame({
-    name: results['metrics'] 
-    for name, results in models_results.items()
-})
-print("\n", baseline_df.round(4))
-
-# %% 6. HYPERPARAMETER TUNING
-# ============================================================================
-
-print("\n" + "="*80)
-print("STEP 6: HYPERPARAMETER TUNING")
-print("="*80)
-print("""
-Hyperparameters control how models learn (not learned from data).
-We use cross-validation to find optimal settings systematically.
-""")
-
-# %% 6.1 Tune Logistic Regression
-# ---------------------------------------------------------------------------
-print("-" * 80)
-print("Tuning Logistic Regression...")
-print("-" * 80)
-
-lr_param_grid = {
-    'C': [0.001, 0.01, 0.1, 1, 10, 100], # regularization to reduce overfitting
-    'penalty': ['l1', 'l2'],             # lasso or ridge regression to reduce overfitting
-    'solver': ['liblinear', 'saga']      # algorithm to find optimal coefficient
-}
+# %% 7. HYPERPARAMETER TUNING
+# ==============================================================================
+# Hyperparameters (tree depth, regularisation strength, ...) steer *how* a model
+# learns; they are not learned from the data. GridSearchCV tries every
+# combination; RandomizedSearchCV samples n_iter of them, which wins as soon as
+# the grid gets large. Both score each candidate by cross-validation.
 
 lr_grid = GridSearchCV(
-    LogisticRegression(random_state=42, max_iter=1000),
-    lr_param_grid, cv=5, scoring='roc_auc', n_jobs=-1, verbose=0
+    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+    {"C": [0.01, 0.1, 1, 10], "penalty": ["l1", "l2"], "solver": ["liblinear"]},
+    cv=3,
+    scoring="roc_auc",
+    n_jobs=-1,
 )
 lr_grid.fit(X_train_scaled, y_train)
+print("\n" + "-" * 78)
+print("GRIDSEARCHCV — Logistic Regression")
+print("-" * 78)
+print(f"  Candidates: {len(lr_grid.cv_results_['params'])} x 3 folds = {len(lr_grid.cv_results_['params']) * 3} fits")
+print(f"  Best params: {lr_grid.best_params_}")
+print(f"  Best CV ROC-AUC: {lr_grid.best_score_:.4f}")
 
-lr_tuned = lr_grid.best_estimator_
-lr_tuned_pred = lr_tuned.predict(X_test_scaled)
-lr_tuned_proba = lr_tuned.predict_proba(X_test_scaled)[:, 1]
-
-models_results['LR_Tuned'] = {
-    'model': lr_tuned,
-    'predictions': lr_tuned_pred,
-    'probabilities': lr_tuned_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, lr_tuned_pred),
-        'Precision': precision_score(y_test, lr_tuned_pred),
-        'Recall': recall_score(y_test, lr_tuned_pred),
-        'F1-Score': f1_score(y_test, lr_tuned_pred),
-        'ROC-AUC': roc_auc_score(y_test, lr_tuned_proba)
+xgb_search = RandomizedSearchCV(
+    xgb.XGBClassifier(random_state=RANDOM_STATE, eval_metric="logloss"),
+    {
+        "max_depth": [3, 5, 7],
+        "learning_rate": [0.05, 0.1, 0.3],
+        "n_estimators": [100, 200],
+        "subsample": [0.8, 1.0],
+        "colsample_bytree": [0.8, 1.0],
     },
-    'best_params': lr_grid.best_params_,
-    'cv_score': lr_grid.best_score_
-}
-
-print(f"Best Parameters: {lr_grid.best_params_}")
-print(f"CV ROC-AUC: {lr_grid.best_score_:.4f}")
-print(f"Test ROC-AUC: {models_results['LR_Tuned']['metrics']['ROC-AUC']:.4f}")
-improvement = models_results['LR_Tuned']['metrics']['ROC-AUC'] - models_results['LR_Default']['metrics']['ROC-AUC']
-print(f"Improvement: {improvement:+.4f}")
-
-# %% 6.2 Tune XGBoost
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("Tuning XGBoost...")
-print("-" * 80)
-
-xgb_param_grid = {
-    'max_depth': [3, 5],
-    'learning_rate': [0.1, 0.3],
-    'n_estimators': [50, 100, 200],
-    'min_child_weight': [3, 5],
-    'subsample': [0.8, 1.0],
-    'colsample_bytree': [0.8, 1.0]
-}
-
-xgb_random = RandomizedSearchCV(
-    xgb.XGBClassifier(random_state=42, eval_metric='logloss'),
-    xgb_param_grid, n_iter=20, cv=5, scoring='roc_auc', 
-    n_jobs=-1, verbose=0, random_state=42
+    n_iter=10,
+    cv=3,
+    scoring="roc_auc",
+    n_jobs=-1,
+    random_state=RANDOM_STATE,
 )
-xgb_random.fit(X_train, y_train)
+xgb_search.fit(X_train, y_train)
+print("\n" + "-" * 78)
+print("RANDOMIZEDSEARCHCV — XGBoost")
+print("-" * 78)
+print(f"  Sampled 10 of 72 combinations x 3 folds = 30 fits")
+print(f"  Best params: {xgb_search.best_params_}")
+print(f"  Best CV ROC-AUC: {xgb_search.best_score_:.4f}")
 
-xgb_tuned = xgb_random.best_estimator_
-xgb_tuned_pred = xgb_tuned.predict(X_test)
-xgb_tuned_proba = xgb_tuned.predict_proba(X_test)[:, 1]
-
-models_results['XGB_Tuned'] = {
-    'model': xgb_tuned,
-    'predictions': xgb_tuned_pred,
-    'probabilities': xgb_tuned_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, xgb_tuned_pred),
-        'Precision': precision_score(y_test, xgb_tuned_pred),
-        'Recall': recall_score(y_test, xgb_tuned_pred),
-        'F1-Score': f1_score(y_test, xgb_tuned_pred),
-        'ROC-AUC': roc_auc_score(y_test, xgb_tuned_proba)
-    },
-    'best_params': xgb_random.best_params_,
-    'cv_score': xgb_random.best_score_
-}
-
-print(f"Best Parameters: {xgb_random.best_params_}")
-print(f"CV ROC-AUC: {xgb_random.best_score_:.4f}")
-print(f"Test ROC-AUC: {models_results['XGB_Tuned']['metrics']['ROC-AUC']:.4f}")
-improvement = models_results['XGB_Tuned']['metrics']['ROC-AUC'] - models_results['XGB_Default']['metrics']['ROC-AUC']
-print(f"Improvement: {improvement:+.4f}")
-
-# %% 6.3 Tune Neural Network
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("Tuning Neural Network...")
-print("-" * 80)
-
-nn_param_grid = {
-    'hidden_layer_sizes': [(32,), (64, 32)],
-    'activation': ['relu', 'tanh'],
-    'alpha': [0.0001, 0.01],
-    'learning_rate_init': [0.001, 0.01]
-}
-
-nn_random = RandomizedSearchCV(
-    MLPClassifier(random_state=42, max_iter=200, early_stopping=True),
-    nn_param_grid, n_iter=5, cv=3, scoring='roc_auc',
-    n_jobs=-1, verbose=0, random_state=42
+results["LR_Tuned"] = evaluate(
+    "Logistic Regression (tuned)", lr_grid.best_estimator_, X_train_scaled, y_train, X_test_scaled, y_test
 )
-nn_random.fit(X_train_scaled, y_train)
+results["XGB_Tuned"] = evaluate("XGBoost (tuned)", xgb_search.best_estimator_, X_train, y_train, X_test, y_test)
 
-nn_tuned = nn_random.best_estimator_
-nn_tuned_pred = nn_tuned.predict(X_test_scaled)
-nn_tuned_proba = nn_tuned.predict_proba(X_test_scaled)[:, 1]
+comparison = pd.DataFrame({k: v["metrics"] for k, v in results.items()}).round(4)
+best_name = comparison.loc["ROC-AUC"].idxmax()
+print("\n" + "=" * 78)
+print("ALL MODELS")
+print("=" * 78)
+print(comparison)
+print(f"\nBest by ROC-AUC: {best_name} ({comparison.loc['ROC-AUC', best_name]:.4f})")
 
-models_results['NN_Tuned'] = {
-    'model': nn_tuned,
-    'predictions': nn_tuned_pred,
-    'probabilities': nn_tuned_proba,
-    'metrics': {
-        'Accuracy': accuracy_score(y_test, nn_tuned_pred),
-        'Precision': precision_score(y_test, nn_tuned_pred),
-        'Recall': recall_score(y_test, nn_tuned_pred),
-        'F1-Score': f1_score(y_test, nn_tuned_pred),
-        'ROC-AUC': roc_auc_score(y_test, nn_tuned_proba)
-    },
-    'best_params': nn_random.best_params_,
-    'cv_score': nn_random.best_score_
-}
+# %% 8. EVALUATION METRICS
+# ==============================================================================
+# Accuracy alone is a trap: with 57% churners, "predict churn for everyone"
+# already scores 57%. What each metric answers:
+#
+#   Precision   of those we flagged, how many really churn? (cost of wasted offers)
+#   Recall      of those who churn, how many did we catch?  (cost of missed saves)
+#   F1          harmonic mean of the two
+#   ROC-AUC     separability across ALL thresholds
+#   PR-AUC      same idea, but focused on the positive class — the honest choice
+#               when the positives are the rare and expensive ones
 
-print(f"Best Parameters: {nn_random.best_params_}")
-print(f"CV ROC-AUC: {nn_random.best_score_:.4f}")
-print(f"Test ROC-AUC: {models_results['NN_Tuned']['metrics']['ROC-AUC']:.4f}")
-improvement = models_results['NN_Tuned']['metrics']['ROC-AUC'] - models_results['NN_Default']['metrics']['ROC-AUC']
-print(f"Improvement: {improvement:+.4f}")
+best = results[best_name]
 
-print("\n✓ Hyperparameter tuning complete!")
-
-# %% 7. COMPREHENSIVE MODEL COMPARISON
-# ============================================================================
-
-print("\n" + "="*80)
-print("STEP 7: COMPREHENSIVE MODEL COMPARISON")
-print("="*80)
-
-# Create comparison dataframe
-comparison_df = pd.DataFrame({
-    name: results['metrics'] 
-    for name, results in models_results.items()
-})
-
-print("\n📊 All Models Performance Summary:")
-print(comparison_df.round(4))
-
-# Identify best model
-best_model_name = comparison_df.loc['ROC-AUC'].idxmax()
-best_score = comparison_df.loc['ROC-AUC', best_model_name]
-print(f"\n🏆 Best Model: {best_model_name} (ROC-AUC: {best_score:.4f})")
-
-
-# %% Visualization: ROC Curves
-# ---------------------------------------------------------------------------
-model_order = ['LR_Default', 'LR_Tuned', 'XGB_Default', 'XGB_Tuned', 'NN_Default', 'NN_Tuned']
-colors = ['#3498db', '#2980b9', '#2ecc71', '#27ae60', '#e74c3c', '#c0392b']
+cm = confusion_matrix(y_test, best["predictions"])
+tn, fp, fn, tp = cm.ravel()
+print("\n" + "-" * 78)
+print(f"CONFUSION MATRIX — {best['name']}")
+print("-" * 78)
+print("                  predicted stay   predicted churn")
+print(f"  actual stay        {tn:>8,}         {fp:>8,}   <- false alarms, wasted offers")
+print(f"  actual churn       {fn:>8,}         {tp:>8,}   <- missed churners (top-left of the two costs)")
+print()
+print(classification_report(y_test, best["predictions"], target_names=["Stay", "Churn"], digits=4))
 
 fig_roc = go.Figure()
-
-line_styles = [
-    {'dash': 'dash', 'width': 2, 'color': '#3498db'},
-    {'dash': 'solid', 'width': 3, 'color': '#2980b9'},
-    {'dash': 'dash', 'width': 2, 'color': '#2ecc71'},
-    {'dash': 'solid', 'width': 3, 'color': '#27ae60'},
-    {'dash': 'dash', 'width': 2, 'color': '#e74c3c'},
-    {'dash': 'solid', 'width': 3, 'color': '#c0392b'}
-]
-
-for idx, (name, results) in enumerate(models_results.items()):
-    fpr, tpr, _ = roc_curve(y_test, results['probabilities'])
-    auc = results['metrics']['ROC-AUC']
-    
-    fig_roc.add_trace(go.Scatter(
-        x=fpr, y=tpr,
-        name=f"{name.replace('_', ' ')} (AUC={auc:.3f})",
-        mode='lines',
-        line=line_styles[idx]
-    ))
-
-# Reference line
-fig_roc.add_trace(go.Scatter(
-    x=[0, 1], y=[0, 1],
-    name='Random (AUC=0.500)',
-    mode='lines',
-    line=dict(dash='dot', color='gray', width=1)
-))
-
+for key, result in results.items():
+    fpr, tpr, _ = roc_curve(y_test, result["probabilities"])
+    fig_roc.add_trace(
+        go.Scatter(x=fpr, y=tpr, mode="lines", name=f"{key} (AUC={result['metrics']['ROC-AUC']:.3f})")
+    )
+fig_roc.add_trace(
+    go.Scatter(x=[0, 1], y=[0, 1], mode="lines", name="Chance (0.500)", line=dict(dash="dot", color="gray"))
+)
 fig_roc.update_layout(
-    title='<b>ROC Curves: All Models (Dashed=Default, Solid=Tuned)</b>',
-    xaxis_title='False Positive Rate',
-    yaxis_title='True Positive Rate',
-    height=600,
-    width=900
+    title="<b>ROC curves</b>", xaxis_title="False positive rate", yaxis_title="True positive rate", height=550
 )
 fig_roc.show()
 
-# %% Visualization: Propensity Score Distributions
-# ---------------------------------------------------------------------------
-fig_prop = make_subplots(
-    rows=2, cols=3,
-    subplot_titles=[f"<b>{name.replace('_', ' ')}</b>" for name in model_order],
-    vertical_spacing=0.12
+precision, recall, _ = precision_recall_curve(y_test, best["probabilities"])
+fig_pr = go.Figure()
+fig_pr.add_trace(go.Scatter(x=recall, y=precision, mode="lines", name=best["name"], line=dict(width=3)))
+fig_pr.add_hline(
+    y=y_test.mean(),
+    line_dash="dot",
+    annotation_text=f"Chance level (AP = {y_test.mean():.2f})",
 )
-
-for idx, model_name in enumerate(model_order):
-    row = (idx // 3) + 1
-    col = (idx % 3) + 1
-    
-    proba = models_results[model_name]['probabilities']
-    
-    # No Churn
-    fig_prop.add_trace(
-        go.Histogram(
-            x=proba[y_test == 0],
-            name='No Churn',
-            marker_color='#2ecc71',
-            opacity=0.7,
-            legendgroup='g1',
-            showlegend=(idx == 0),
-            nbinsx=30
-        ),
-        row=row, col=col
-    )
-    
-    # Churn
-    fig_prop.add_trace(
-        go.Histogram(
-            x=proba[y_test == 1],
-            name='Churn',
-            marker_color='#e74c3c',
-            opacity=0.7,
-            legendgroup='g2',
-            showlegend=(idx == 0),
-            nbinsx=30
-        ),
-        row=row, col=col
-    )
-
-fig_prop.update_xaxes(title_text="Propensity Score", range=[0, 1])
-fig_prop.update_yaxes(title_text="Count")
-fig_prop.update_layout(
-    title_text='<b>Propensity Score Distributions by Model</b>',
-    barmode='overlay',
-    height=700,
-    width=1400
-)
-fig_prop.show()
-
-
-# %% Feature Importance (Top Models)
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("Feature Importance Analysis")
-print("-" * 80)
-
-# Logistic Regression Coefficients
-lr_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Coefficient': np.abs(models_results['LR_Tuned']['model'].coef_[0])
-}).sort_values('Coefficient', ascending=False).head(10)
-
-# XGBoost Feature Importance
-xgb_importance = pd.DataFrame({
-    'Feature': X_train.columns,
-    'Importance': models_results['XGB_Tuned']['model'].feature_importances_
-}).sort_values('Importance', ascending=False).head(10)
-
-print("\n📊 Top 10 Features - Logistic Regression:")
-for i, row in lr_importance.iterrows():
-    print(f"  {row['Feature']:30s} {row['Coefficient']:.4f}")
-
-print("\n📊 Top 10 Features - XGBoost:")
-for i, row in xgb_importance.iterrows():
-    print(f"  {row['Feature']:30s} {row['Importance']:.4f}")
-
-# Visualize side by side
-fig_importance = make_subplots(
-    rows=1, cols=2,
-    subplot_titles=('<b>Logistic Regression</b>', '<b>XGBoost</b>')
-)
-
-fig_importance.add_trace(
-    go.Bar(
-        x=lr_importance['Coefficient'],
-        y=lr_importance['Feature'],
-        orientation='h',
-        marker_color='#3498db',
-        name='LR Coefficients'
-    ),
-    row=1, col=1
-)
-
-fig_importance.add_trace(
-    go.Bar(
-        x=xgb_importance['Importance'],
-        y=xgb_importance['Feature'],
-        orientation='h',
-        marker_color='#2ecc71',
-        name='XGB Importance'
-    ),
-    row=1, col=2
-)
-
-fig_importance.update_xaxes(title_text="Coefficient Magnitude", row=1, col=1)
-fig_importance.update_xaxes(title_text="Importance Score", row=1, col=2)
-fig_importance.update_yaxes(autorange="reversed")
-
-fig_importance.update_layout(
-    title_text='<b>Top 10 Feature Importance Comparison</b>',
+fig_pr.update_layout(
+    title=f"<b>Precision-Recall curve — AP = {best['metrics']['PR-AUC']:.3f}</b>",
+    xaxis_title="Recall",
+    yaxis_title="Precision",
     height=500,
-    width=1200,
-    showlegend=False
 )
-fig_importance.show()
+fig_pr.show()
 
-# %% Detailed Classification Reports for Best Models
-# ---------------------------------------------------------------------------
-print("\n" + "="*80)
-print("DETAILED CLASSIFICATION REPORTS - TUNED MODELS")
-print("="*80)
+# %% 9. LEARNING AND VALIDATION CURVES
+# ==============================================================================
+# Two diagnostics that answer different questions.
+#
+# Learning curve — "would more data help?"
+#   both curves low and together .... underfitting, the model is too simple
+#   train high, validation low ...... overfitting, the model memorises
+#   curves converging high ........... healthy
+#
+# Validation curve — "how does ONE hyperparameter change things?"
+#   Sweep it and watch where validation performance peaks and starts to fall.
 
-model_names_for_report = ['LR_Tuned', 'XGB_Tuned', 'NN_Tuned']
-
-for model_name in model_names_for_report:
-    predictions = models_results[model_name]['predictions']
-    
-    print(f"\n{'-'*80}")
-    print(f"📋 {model_name.replace('_', ' ')}")
-    print(f"{'-'*80}")
-    
-    # Confusion Matrix
-    cm = confusion_matrix(y_test, predictions)
-    print("\nConfusion Matrix:")
-    print(f"                 Predicted")
-    print(f"              No Churn  Churn")
-    print(f"Actual  No Churn  {cm[0,0]:5d}    {cm[0,1]:5d}")
-    print(f"        Churn    {cm[1,0]:5d}    {cm[1,1]:5d}")
-    
-    # Calculate additional metrics from confusion matrix
-    tn, fp, fn, tp = cm[0,0], cm[0,1], cm[1,0], cm[1,1]
-    specificity = tn / (tn + fp) if (tn + fp) > 0 else 0
-    
-    print(f"\nConfusion Matrix Breakdown:")
-    print(f"  True Negatives (TN):  {tn} - Correctly predicted no churn")
-    print(f"  False Positives (FP): {fp} - Incorrectly predicted churn")
-    print(f"  False Negatives (FN): {fn} - Incorrectly predicted no churn (MISSED churners)")
-    print(f"  True Positives (TP):  {tp} - Correctly predicted churn")
-    print(f"  Specificity: {specificity:.4f} (% of non-churners correctly identified)")
-    
-    # Classification Report
-    print("\nClassification Report:")
-    print(classification_report(y_test, predictions, 
-                              target_names=['No Churn', 'Churn'],
-                              digits=4))
-    
-# %% 8. BUSINESS INSIGHTS & DEPLOYMENT RECOMMENDATIONS
-# ============================================================================
-
-print("\n" + "="*80)
-print("STEP 8: BUSINESS INSIGHTS & DEPLOYMENT")
-print("="*80)
-
-# Use best model for business recommendations
-best_model_results = models_results[best_model_name]
-best_propensity = best_model_results['probabilities']
-
-print(f"\n🎯 Selected Model for Deployment: {best_model_name.replace('_', ' ')}")
-print(f"   Performance Metrics:")
-for metric, value in best_model_results['metrics'].items():
-    print(f"     {metric:12s}: {value:.4f}")
-
-# %% Customer Risk Segmentation
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("Customer Risk Segmentation")
-print("-" * 80)
-
-# Define risk thresholds
-threshold_high = 0.7
-threshold_medium = 0.4
-
-# Create risk segments
-risk_segments = pd.DataFrame({
-    'Customer_ID': range(len(y_test)),
-    'Propensity_Score': best_propensity,
-    'Actual_Churn': y_test.values
-})
-
-risk_segments['Risk_Segment'] = pd.cut(
-    risk_segments['Propensity_Score'],
-    bins=[0, threshold_medium, threshold_high, 1],
-    labels=['Low Risk', 'Medium Risk', 'High Risk']
+sizes, train_scores, val_scores = learning_curve(
+    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
+    X_train_scaled,
+    y_train,
+    train_sizes=np.linspace(0.1, 1.0, 6),
+    cv=3,
+    scoring="roc_auc",
+    n_jobs=-1,
 )
 
-print("\n📊 Customer Distribution by Risk Segment:")
-segment_stats = risk_segments.groupby('Risk_Segment').agg({
-    'Customer_ID': 'count',
-    'Actual_Churn': 'mean'
-}).rename(columns={'Customer_ID': 'Count', 'Actual_Churn': 'Actual_Churn_Rate'})
-segment_stats['Actual_Churn_Rate'] = segment_stats['Actual_Churn_Rate'] * 100
-
-for segment in ['Low Risk', 'Medium Risk', 'High Risk']:
-    if segment in segment_stats.index:
-        count = segment_stats.loc[segment, 'Count']
-        rate = segment_stats.loc[segment, 'Actual_Churn_Rate']
-        pct = (count / len(risk_segments)) * 100
-        print(f"  {segment:12s}: {count:5.0f} customers ({pct:5.1f}%) - Actual churn: {rate:5.1f}%")
-
-# Visualize risk segments
-fig_segments = px.histogram(
-    risk_segments,
-    x='Risk_Segment',
-    color='Actual_Churn',
-    barmode='group',
-    title='<b>Customer Distribution by Risk Segment</b>',
-    labels={'Actual_Churn': 'Churned', 'Risk_Segment': 'Risk Segment'},
-    color_discrete_map={0: '#2ecc71', 1: '#e74c3c'},
-    category_orders={'Risk_Segment': ['Low Risk', 'Medium Risk', 'High Risk']}
+fig_lc = go.Figure()
+for scores, label, color in [(train_scores, "Training", "#3498db"), (val_scores, "Validation", "#e67e22")]:
+    mean, std = scores.mean(axis=1), scores.std(axis=1)
+    fig_lc.add_trace(go.Scatter(x=sizes, y=mean, mode="lines+markers", name=label, line=dict(color=color, width=3)))
+    fig_lc.add_trace(
+        go.Scatter(
+            x=np.concatenate([sizes, sizes[::-1]]),
+            y=np.concatenate([mean + std, (mean - std)[::-1]]),
+            fill="toself",
+            fillcolor=color,
+            opacity=0.15,
+            line=dict(width=0),
+            showlegend=False,
+            hoverinfo="skip",
+        )
+    )
+fig_lc.update_layout(
+    title="<b>Learning curve — Logistic Regression</b>",
+    xaxis_title="Training samples",
+    yaxis_title="ROC-AUC",
+    height=500,
 )
-fig_segments.update_layout(height=500)
-fig_segments.show()
+fig_lc.show()
 
-# %% Cross-Validation Analysis
-# ---------------------------------------------------------------------------
-print("\n" + "-" * 80)
-print("Cross-Validation Robustness Check")
-print("-" * 80)
+c_values = [0.001, 0.01, 0.1, 1, 10, 100]
+train_scores_vc, val_scores_vc = validation_curve(
+    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000, solver="liblinear"),
+    X_train_scaled,
+    y_train,
+    param_name="C",
+    param_range=c_values,
+    cv=3,
+    scoring="roc_auc",
+    n_jobs=-1,
+)
 
-print("\nPerforming 5-fold cross-validation on tuned models...")
+fig_vc = go.Figure()
+fig_vc.add_trace(
+    go.Scatter(x=c_values, y=train_scores_vc.mean(axis=1), mode="lines+markers", name="Training")
+)
+fig_vc.add_trace(go.Scatter(x=c_values, y=val_scores_vc.mean(axis=1), mode="lines+markers", name="Validation"))
+fig_vc.update_layout(
+    title="<b>Validation curve — regularisation strength C</b>",
+    xaxis_title="C (low = strong regularisation)",
+    xaxis_type="log",
+    yaxis_title="ROC-AUC",
+    height=500,
+)
+fig_vc.show()
 
-# Get appropriate data for each model type
-cv_data = {
-    'LR_Tuned': (X_train_scaled, y_train, models_results['LR_Tuned']['model']),
-    'XGB_Tuned': (X_train, y_train, models_results['XGB_Tuned']['model']),
-    'NN_Tuned': (X_train_scaled, y_train, models_results['NN_Tuned']['model'])
-}
+print("\n" + "-" * 78)
+print("CURVE READING")
+print("-" * 78)
+print(f"  Learning curve  — train {train_scores.mean(axis=1)[-1]:.4f} vs validation {val_scores.mean(axis=1)[-1]:.4f}")
+print(f"  Gap: {train_scores.mean(axis=1)[-1] - val_scores.mean(axis=1)[-1]:+.4f} (a large positive gap = overfitting)")
+print(f"  Validation curve — best C = {c_values[int(np.argmax(val_scores_vc.mean(axis=1)))]}")
 
-cv_results = {}
-for name, (X_data, y_data, model) in cv_data.items():
-    scores = cross_val_score(model, X_data, y_data, cv=5, scoring='roc_auc', n_jobs=-1)
-    cv_results[name] = scores
-    print(f"\n{name.replace('_', ' ')}:")
-    print(f"  Mean:   {scores.mean():.4f}")
-    print(f"  Std:    {scores.std():.4f}")
-    print(f"  Range:  [{scores.min():.4f}, {scores.max():.4f}]")
+# %% 10. FEATURE IMPORTANCE
+# ==============================================================================
+# Two different questions: the linear model reports *direction and size* of an
+# effect, the tree model reports *how useful a feature was for splitting*.
 
-# Visualize CV results
-cv_df = pd.DataFrame(cv_results)
-cv_melted = cv_df.melt(var_name='Model', value_name='ROC-AUC')
+lr_importance = (
+    pd.DataFrame({"Feature": X_train.columns, "Weight": np.abs(results["LR_Tuned"]["model"].coef_[0])})
+    .sort_values("Weight", ascending=False)
+    .head(10)
+)
+xgb_importance = (
+    pd.DataFrame({"Feature": X_train.columns, "Weight": results["XGB_Tuned"]["model"].feature_importances_})
+    .sort_values("Weight", ascending=False)
+    .head(10)
+)
 
-fig_cv = px.box(
-    cv_melted,
-    x='Model',
-    y='ROC-AUC',
-    color='Model',
-    title='<b>Cross-Validation Stability (5 Folds)</b>',
-    points='all',
-    color_discrete_map={
-        'LR_Tuned': '#3498db',
-        'XGB_Tuned': '#2ecc71',
-        'NN_Tuned': '#e74c3c'
+fig_imp = make_subplots(rows=1, cols=2, subplot_titles=("<b>Logistic Regression |coef|</b>", "<b>XGBoost gain</b>"))
+fig_imp.add_trace(
+    go.Bar(x=lr_importance["Weight"], y=lr_importance["Feature"], orientation="h", marker_color="#3498db"),
+    row=1,
+    col=1,
+)
+fig_imp.add_trace(
+    go.Bar(x=xgb_importance["Weight"], y=xgb_importance["Feature"], orientation="h", marker_color="#2ecc71"),
+    row=1,
+    col=2,
+)
+fig_imp.update_yaxes(autorange="reversed")
+fig_imp.update_layout(title_text="<b>What drives the prediction?</b>", height=500, showlegend=False)
+fig_imp.show()
+
+# %% 11. PROPENSITY SCORES -> RISK SEGMENTS
+# ==============================================================================
+# This is the deliverable. Not "churn: yes/no", but a score per customer that
+# marketing can sort, cut, and act on. The cut-offs are a *business* decision:
+# they trade wasted retention budget (false positives) against lost customers
+# (false negatives).
+
+scores = pd.DataFrame(
+    {
+        "CustomerID": X_test.index,
+        "Propensity": best["probabilities"],
+        "Actual_Churn": y_test.to_numpy(),
     }
 )
-fig_cv.update_xaxes(title_text='Model')
-fig_cv.update_yaxes(title_text='ROC-AUC Score', range=[0.5, 1.0])
-fig_cv.update_layout(height=500, showlegend=False)
-fig_cv.show()
+scores["Segment"] = pd.cut(
+    scores["Propensity"], bins=[0, 0.4, 0.7, 1.0], labels=["Low risk", "Medium risk", "High risk"]
+)
 
-# %% Deployment Recommendations
-# ---------------------------------------------------------------------------
-print("\n" + "="*80)
-print("DEPLOYMENT RECOMMENDATIONS")
-print("="*80)
+segment_summary = (
+    scores.groupby("Segment", observed=False)
+    .agg(Customers=("Propensity", "size"), Actual_churn_rate=("Actual_Churn", "mean"))
+    .assign(Share=lambda d: d["Customers"] / d["Customers"].sum())
+)
+
+print("\n" + "=" * 78)
+print(f"RISK SEGMENTS — scored with {best['name']}")
+print("=" * 78)
+print(segment_summary.round(3))
+
+fig_scores = px.histogram(
+    scores,
+    x="Propensity",
+    color="Actual_Churn",
+    nbins=40,
+    barmode="overlay",
+    opacity=0.7,
+    color_discrete_map={0: "#2ecc71", 1: "#e74c3c"},
+    title="<b>Propensity score distribution — a good model separates the two colours</b>",
+)
+fig_scores.add_vline(x=0.4, line_dash="dash", annotation_text="Low | Medium")
+fig_scores.add_vline(x=0.7, line_dash="dash", annotation_text="Medium | High")
+fig_scores.update_layout(height=500)
+fig_scores.show()
 
 print("""
-📋 IMPLEMENTATION ROADMAP
+ACTIONS PER SEGMENT
+  High risk    personal outreach, retention offer, escalate high-value accounts
+  Medium risk  automated engagement, satisfaction survey, usage tips
+  Low risk     standard communication, upsell and loyalty programmes
 
-1. MODEL DEPLOYMENT
-   ✓ Champion Model: {champion}
-   ✓ Test Set Performance: {performance:.4f} ROC-AUC
-   ✓ Cross-Validation Stability: {cv_mean:.4f} ± {cv_std:.4f}
-   
-2. SCORING PIPELINE
-   • Frequency: Daily batch scoring
-   • Input: Customer database (latest features)
-   • Output: Propensity scores + risk segments
-   • Storage: Update customer table with scores & segments
-   
-3. BUSINESS ACTIONS BY RISK SEGMENT
-   
-   🔴 HIGH RISK (Score > {high_thresh})
-      → Immediate outreach by retention team
-      → Premium retention offers (discounts, upgrades)
-      → Executive escalation for high-value customers
-      → Target: Reduce churn by 30-40%
-      
-   🟡 MEDIUM RISK (Score {med_thresh}-{high_thresh})
-      → Automated engagement campaigns (email, SMS)
-      → Customer satisfaction surveys
-      → Product usage tips and tutorials
-      → Target: Prevent escalation to high risk
-      
-   🟢 LOW RISK (Score < {med_thresh})
-      → Standard communications
-      → Upsell opportunities
-      → Loyalty program engagement
-      → Target: Maintain satisfaction
-      
-4. MONITORING & MAINTENANCE
-   
-   📊 Weekly Monitoring:
-      • Track model performance (precision, recall, ROC-AUC)
-      • Monitor feature distributions for data drift
-      • A/B test retention strategies
-      
-   🔄 Monthly Review:
-      • Analyze false positives/negatives
-      • Gather feedback from retention team
-      • Calculate campaign ROI
-      
-   🔧 Quarterly Retraining:
-      • Retrain with last 12 months data
-      • Re-tune hyperparameters
-      • Update if performance drops >5%
-      
-5. SUCCESS METRICS
-   
-   Model Metrics:
-   • Maintain ROC-AUC > {target_auc:.2f}
-   • Precision > 70% (minimize false alarms)
-   • Recall > 60% (catch most churners)
-   
-   Business Metrics:
-   • Churn rate reduction: Target 15-20%
-   • Retention campaign ROI: Target 3:1
-   • Customer lifetime value increase
-   • Retention team efficiency improvement
+The same machinery answers the acquisition question from the lecture: swap the
+label from "churned" to "bought a membership" and the model finds the
+look-alikes worth approaching.
 
-6. ETHICAL CONSIDERATIONS
-   • Ensure fair treatment across customer segments
-   • Avoid discrimination based on protected attributes
-   • Transparent communication with customers
-   • Regular bias audits
-
-""".format(
-    champion=best_model_name.replace('_', ' '),
-    performance=best_model_results['metrics']['ROC-AUC'],
-    cv_mean=cv_results[best_model_name].mean() if best_model_name in cv_results else best_model_results['metrics']['ROC-AUC'],
-    cv_std=cv_results[best_model_name].std() if best_model_name in cv_results else 0,
-    high_thresh=threshold_high,
-    med_thresh=threshold_medium,
-    target_auc=best_model_results['metrics']['ROC-AUC'] * 0.95
-))
-
-# ---------------------------------------------------------------------------
-# Final Summary Table
-# ---------------------------------------------------------------------------
-print("="*80)
-print("📊 FINAL MODEL SUMMARY")
-print("="*80)
-
-summary_table = []
-for name, results in models_results.items():
-    model_type = name.split('_')[0]
-    version = name.split('_')[1]
-    summary_table.append({
-        'Model': model_type,
-        'Version': version,
-        'ROC-AUC': results['metrics']['ROC-AUC'],
-        'Precision': results['metrics']['Precision'],
-        'Recall': results['metrics']['Recall'],
-        'F1-Score': results['metrics']['F1-Score']
-    })
-
-summary_df = pd.DataFrame(summary_table)
-print("\n", summary_df.to_string(index=False))
-
-# Calculate improvements
-print("\n" + "-"*80)
-print("💡 KEY IMPROVEMENTS FROM TUNING:")
-print("-"*80)
-for model_type in ['LR', 'XGB', 'NN']:
-    default_auc = models_results[f'{model_type}_Default']['metrics']['ROC-AUC']
-    tuned_auc = models_results[f'{model_type}_Tuned']['metrics']['ROC-AUC']
-    improvement = tuned_auc - default_auc
-    pct_improvement = (improvement / default_auc) * 100
-    
-    model_name = {'LR': 'Logistic Regression', 'XGB': 'XGBoost', 'NN': 'Neural Network'}[model_type]
-    print(f"{model_name:20s}: {default_auc:.4f} → {tuned_auc:.4f} "
-          f"(+{improvement:.4f}, +{pct_improvement:.1f}%)")
+Next lesson: survival.py — not just WHETHER a customer churns, but WHEN.
+""")

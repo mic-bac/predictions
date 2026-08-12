@@ -1,6 +1,8 @@
 # Practical Machine Learning Predictions
 
-This repository contains educational examples of common prediction tasks in machine learning and data science. It's designed to help students and beginners understand key concepts through practical, real-world examples.
+Educational examples of common prediction tasks in machine learning and data science,
+built for students and beginners: each script is a readable, runnable walkthrough of one
+method family, with the reasoning written into the code rather than hidden behind it.
 
 ## 🎯 Learning Objectives
 
@@ -12,95 +14,96 @@ This repository contains educational examples of common prediction tasks in mach
 
 ## 🗂️ Project Structure
 
-The repository includes three main prediction examples:
+```
+predictions/
+├── src/churn_data.py   shared loading/cleaning for the two churn lessons
+├── propensity.py       lesson 1 — will they churn?      (classification)
+├── survival.py         lesson 2 — when will they churn? (time-to-event)
+├── timeseries.py       lesson 3 — sales forecasting     (separate topic)
+└── data/               Kaggle downloads (git-ignored, see below)
+```
 
-### 1. Customer Churn Prediction (Propensity Analysis)
+### 1. Propensity Models — Look-alike Modeling
 `propensity.py`
-- Probability-based approach to predict customer churn
-- Uses logistic regression, neural networks, and other ML models
-- Focuses on model comparison and evaluation
-- Includes feature importance analysis
-- Demonstrates complete ML workflow from data prep to deployment
 
-### 2. Customer Churn Analysis (Survival Analysis)
+Estimates, per customer, the **probability** of churning, and turns those scores into
+targetable segments. Covers the look-alike time-window design (observation → buffer →
+outcome), three model families (logistic regression, XGBoost, neural network),
+cross-validation, `GridSearchCV`/`RandomizedSearchCV`, the metrics that matter for
+imbalanced data (precision/recall/F1, ROC-AUC, PR-AUC, confusion matrix), and
+learning/validation curves for diagnosing under- and overfitting.
+
+### 2. Survival Analysis — Time to Churn
 `survival.py`
-- Time-based approach to analyze customer churn
-- Uses survival analysis techniques (Kaplan-Meier, Cox models)
-- Handles censored data (active customers)
-- Provides time-to-event predictions
-- Visualizes survival curves and hazard rates
+
+Estimates **when** the event happens, and handles the customers who have not churned yet
+(right-censored data) instead of discarding them. Covers Kaplan-Meier survival curves,
+Cox proportional hazards, Random Survival Forest and Survival SVM, plus the
+survival-specific metrics: concordance index, time-dependent AUC(t), and the integrated
+Brier score.
 
 ### 3. Sales Forecasting (Time Series)
 `timeseries.py`
-- Time series forecasting for retail sales
-- Uses Facebook Prophet and XGBoost
-- Includes seasonal decomposition
-- Features advanced visualization techniques
-- Demonstrates feature engineering for time series
+
+Retail sales forecasting with Prophet and XGBoost, seasonal decomposition, and time-series
+feature engineering. A separate topic from the two churn lessons above.
 
 ## 🛠️ Prerequisites
 
-- Python 3.10 or later
+- Python 3.13 (see `.python-version`)
 - Basic understanding of Python programming
 - Familiarity with data analysis concepts
 - Basic statistics knowledge
 
 ## 📦 Installation
 
-1. Clone this repository:
+Clone the repository and sync the environment with [uv](https://docs.astral.sh/uv/):
+
 ```bash
 git clone https://github.com/mic-bac/predictions.git
 cd predictions
+uv sync
 ```
 
-2. Create a conda environment using the provided configuration:
-```bash
-conda env create -f conda_env.yaml
-```
-
-3. Activate the environment:
-```bash
-conda activate predictions
-```
+A conda alternative is kept in `conda_env.yaml`, but `uv` is the supported path — it is
+what `pyproject.toml` and `uv.lock` describe.
 
 ## 📊 Datasets
 
-The project uses two main datasets:
+The CSVs are **not** in git (they are ~40 MB); download them from Kaggle into `data/`.
 
-### Customer Churn Dataset
-Located in `data/churn/`:
+### Customer Churn Dataset → `data/churn/`
 - `customer_churn_dataset-training-master.csv`
 - `customer_churn_dataset-testing-master.csv`
 
 Source: [Kaggle Customer Churn Dataset](https://www.kaggle.com/datasets/muhammadshahidazeem/customer-churn-dataset)
 
-### Walmart Sales Dataset
-Located in `data/sales/`:
-- `train.csv`: Historical sales data
-- `test.csv`: Test dataset
-- `stores.csv`: Store metadata
-- `features.csv`: Additional features (temperature, fuel price, etc.)
+Both files are two halves of one customer base, not a modelling split — `src/churn_data.py`
+concatenates them and each lesson makes its own split.
+
+### Walmart Sales Dataset → `data/sales/`
+- `train.csv`, `test.csv`, `stores.csv`, `features.csv`
 
 Source: [Kaggle Walmart Sales Dataset](https://www.kaggle.com/datasets/aslanahmedov/walmart-sales-forecast)
 
 ## 📚 Getting Started
 
-Each Python file is self-contained and includes detailed comments explaining the concepts and implementation:
+Each script runs top to bottom, prints its results, and opens interactive Plotly figures.
+They can also be stepped through cell by cell — the `# %%` markers make them notebooks in
+VS Code or Jupyter.
 
-1. For churn prediction using propensity scores:
-```python
-python propensity.py
+```bash
+uv run python propensity.py
+uv run python survival.py
+uv run python timeseries.py
 ```
 
-2. For survival analysis approach to churn:
-```python
-python survival.py
-```
+### Sample size
 
-3. For time series sales forecasting:
-```python
-python timeseries.py
-```
+`propensity.py` and `survival.py` each define a `SAMPLE_SIZE` constant near the top. The
+full dataset is ~505,000 customers, where a hyperparameter search takes hours; the defaults
+(20,000 and 5,000) keep every result under a minute without changing the conclusions. Set
+`SAMPLE_SIZE = None` to use everything.
 
 ## 📋 Dependencies
 
@@ -115,9 +118,9 @@ Main libraries used:
 
 ## 🎓 Learning Path
 
-1. Start with `propensity.py` to learn basic ML workflow and classification
-2. Move to `survival.py` to understand time-based analysis
-3. Finally, explore `timeseries.py` for forecasting techniques
+1. `propensity.py` — the ML workflow end to end, and classification metrics
+2. `survival.py` — the same business question, now with time and censoring
+3. `timeseries.py` — forecasting a continuous series into the future
 
 Each file includes:
 - Detailed comments explaining concepts
@@ -136,5 +139,3 @@ Contributions to improve the educational content or add new examples are welcome
 ## 📄 License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
-
-
