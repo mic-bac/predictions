@@ -409,8 +409,8 @@ print(f"  {'XGBoost (one model)':<28}{panel_scores['XGBoost']['MAPE']:>7.2f}%{xg
 print(f"  {'Holt-Winters (per store)':<28}{ets_mape:>7.2f}%{ets_seconds:>11.1f}s{len(ets_errors):>16}")
 
 print(f"""
-  This is the honest case for gradient boosting on forecasting problems, and it
-  is not the one the slides make. XGBoost does beat the seasonal baseline here
+  This is the case for gradient boosting on forecasting problems that the slides
+  make — "strong when there are many rows" — measured. XGBoost does beat the seasonal baseline here
   ({panel_scores['XGBoost']['MAPE']:.2f}% against {panel_scores['seasonal naive']['MAPE']:.2f}%). It does not beat fitting a classical model to
   every store separately ({ets_mape:.2f}%).
 
@@ -472,8 +472,8 @@ print("""
 
 # %% 11. DO EXTERNAL FEATURES HELP?
 # ==============================================================================
-# The claim on the slides is that XGBoost shines when the series is enriched with
-# external drivers — weather being the standard example. This dataset ships four:
+# The slides say external drivers (weather being the standard example) CAN be
+# integrated into XGBoost. Whether they help is an empirical question. This dataset ships four:
 # temperature, fuel price, CPI and unemployment. So test it.
 #
 # One fold would not settle this, because the differences are small enough to be
@@ -698,36 +698,41 @@ print(f"""
 # %% 15. WHAT THE SLIDES CLAIM, AND WHAT THIS DATA SHOWS
 # ==============================================================================
 
-print("\nSLIDES VS DATA")
+print("\nSLIDES VS DATA — the conditions on the slides, tested")
 print("-" * 78)
 print(f"""
-  "Prophet: additive modelling, fast fitting, good explainability"
-      Holds, completely. {prophet_seconds:.1f}s to fit, and the components in section 6 are
-      the reason to choose it — a trend, a season and a holiday effect that can
-      be shown to somebody who does not model.
+  The slides do not promise that Prophet or XGBoost win. They state the conditions
+  under which each one is strong. This lesson checked each condition on real data:
 
-  "XGBoost ... partly better than classical models such as ARIMA"
-      Depends entirely on the grain, which the slides do not mention.
-        one series      XGBoost {tc.forecast_metrics(test, chain_results['XGBoost'])['MAPE']:.2f}%  vs  SARIMA 1.57%   loses badly
+  "Prophet: explainable additive components; strength is explainability and
+   automation, not automatically higher accuracy"
+      Holds. {prophet_seconds:.1f}s to fit, and section 6's trend, season and holiday
+      effect can be shown to somebody who does not model. Whether it is more
+      ACCURATE than a classical model is what the baseline comparison decides.
+
+  "XGBoost: strong with many rows (many stores/products in one model); on a single
+   short series it often loses to simple baselines and cannot extrapolate a trend"
+      Holds, both halves:
+        one series      XGBoost {tc.forecast_metrics(test, chain_results['XGBoost'])['MAPE']:.2f}%  vs  SARIMA 1.57%   loses
         45 stores       XGBoost {panel_scores['XGBoost']['MAPE']:.2f}%  vs  seasonal naive {panel_scores['seasonal naive']['MAPE']:.2f}%   wins
-      A booster needs rows. Below a few thousand it is the wrong tool, and no
-      hyper-parameter search fixes that.
+      A booster needs rows before it needs tuning. The trend half is section 13.
 
-  "Feature engineering important: also integrate external factors (e.g. weather)"
+  "Feature engineering matters; external factors (e.g. weather) can be integrated"
       Feature engineering: strongly supported — ``{importance.idxmax()}`` alone carries {importance.max():.0%}
-      of the panel model. External factors: not supported here. Temperature, fuel
-      price, CPI and unemployment moved the mean error by {difference:+.2f} points, which
-      is {fold_spread / max(abs(difference), 1e-9):.0f}x smaller than the spread between folds. The features that
-      mattered were lags of the target itself.
+      of the panel model. External factors: they CAN be integrated, but these ones
+      did not help. Temperature, fuel price, CPI and unemployment moved the mean
+      error by {difference:+.2f} points, {fold_spread / max(abs(difference), 1e-9):.0f}x smaller than the spread between folds.
+      Drivers have to be causally close to the target; weather for an ice-cream
+      maker would be, macro indicators for a department store are not.
 
-  "Scaling forecasts in companies / forecasting at scale"
-      This is the real case for boosting, and it is an operations argument:
-      one model in {xgb_seconds:.1f}s covering {store_panel['Store'].nunique()} stores against {len(ets_errors)} separate fits
-      taking {ets_seconds:.1f}s — and {len(ets_errors)} objects to store, monitor and re-fit.
+  "Forecasting at scale"
+      The real case for boosting, and an operations argument: one model in
+      {xgb_seconds:.1f}s for {store_panel['Store'].nunique()} stores against {len(ets_errors)} separate fits taking {ets_seconds:.1f}s
+      — and {len(ets_errors)} objects to store, monitor and re-fit.
 
-  "MAE, RMSE, MAPE are indispensable"
-      With a caveat the slides omit: at department grain MAPE reports {dept_metrics['MAPE']:.0f}%
-      for a model that is not broken. Pick the metric to fit the data.
+  "Who wins depends on the grain — fix grain, baseline and metric first"
+      The through-line of this lesson. At department grain even the metric breaks:
+      MAPE reports {dept_metrics['MAPE']:.0f}% for a model that is not broken.
 
   The transferable habit: state the grain, the baseline and the metric before
   the model. A forecasting result without all three is not yet a result.""")

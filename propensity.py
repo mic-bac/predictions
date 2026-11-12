@@ -522,9 +522,24 @@ fig_vc.show()
 print("\n" + "-" * 78)
 print("CURVE READING")
 print("-" * 78)
-print(f"  Learning curve  — train {train_scores.mean(axis=1)[-1]:.4f} vs validation {val_scores.mean(axis=1)[-1]:.4f}")
-print(f"  Gap: {train_scores.mean(axis=1)[-1] - val_scores.mean(axis=1)[-1]:+.4f} (a large positive gap = overfitting)")
-print(f"  Validation curve — best C = {c_values[int(np.argmax(val_scores_vc.mean(axis=1)))]}")
+lr_val_level = val_scores.mean(axis=1)[-1]
+best_val_level = max(lr_grid.best_score_, xgb_search.best_score_, nn_search.best_score_)
+print(f"  Learning curve  — train {train_scores.mean(axis=1)[-1]:.4f} vs validation {lr_val_level:.4f}")
+print(f"  Gap: {train_scores.mean(axis=1)[-1] - lr_val_level:+.4f} (a large positive gap = overfitting)")
+# "Converged" is not the same as "good". Both curves meeting means the model is
+# not memorising — it can still be too SIMPLE. The yardstick is what a more
+# flexible model reaches on the same data.
+print(f"  Best CV ROC-AUC of any tuned model: {best_val_level:.4f}")
+if best_val_level - lr_val_level > 0.02:
+    print("  -> The curves converge BELOW what a more flexible model reaches: high bias.")
+    print("     More data will not help logistic regression here; a non-linear model does.")
+vc_means = val_scores_vc.mean(axis=1)
+best_c = c_values[int(np.argmax(vc_means))]
+if vc_means.max() - vc_means.min() < 0.005:
+    print(f"  Validation curve — flat (spread {vc_means.max() - vc_means.min():.4f}): C barely matters,")
+    print(f"     so 'best C = {best_c}' is noise, not a finding.")
+else:
+    print(f"  Validation curve — best C = {best_c}")
 
 # Every model family has its own complexity knob. The same diagnostic on the
 # other two shows the under-fit / sweet-spot / over-fit shape on each of them.
@@ -634,6 +649,17 @@ fig_scores.add_vline(x=0.4, line_dash="dash", annotation_text="Low | Medium")
 fig_scores.add_vline(x=0.7, line_dash="dash", annotation_text="Medium | High")
 fig_scores.update_layout(height=500)
 fig_scores.show()
+
+print("""
+A WORD ON THIS DATASET
+  The score histogram separates churners from stayers almost perfectly. That says
+  more about this Kaggle dataset than about churn modelling: it is unusually clean.
+  Single thresholds nearly decide the label — more than 5 support calls, more than
+  20 days of payment delay, under 500 total spend or a monthly contract each come
+  with a churn rate around 90%.
+  Real churn data overlaps far more — expect ROC-AUC around 0.7-0.8, not 0.95, and
+  a much fuller medium-risk segment.
+""")
 
 print("""
 ACTIONS PER SEGMENT

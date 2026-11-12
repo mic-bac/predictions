@@ -645,6 +645,11 @@ print(f"""
       particular has a failure mode this grain of data hides — see
       forecasting.py, section 12.
 
+  "Cross-validation for time series: rolling origin — never random k-folds"
+      Holds, and section 12 shows why it is the only option: a random fold would
+      train on next Christmas to predict last October. Rolling origin always fits
+      on the past and scores on the future, exactly as the forecast will be used.
+
   The transferable habit: run the suitability report before the model, and
   report the baseline next to every result.""")
 

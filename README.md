@@ -6,9 +6,11 @@ walkthrough of one method family, with the reasoning written into the code rathe
 hidden behind it — and each ends by naming what its method *cannot* do, because that is
 usually the part nobody tells you.
 
-The forecasting lessons take that further. They report several results where the method
-on the slides loses to a baseline with no parameters at all, and explain why. That is
-deliberate: a student who has only seen models succeed has not been taught to evaluate one.
+The forecasting lessons take that further. The slides state the *conditions* under which
+Prophet and XGBoost are strong — enough rows, the right grain, a baseline to beat — and the
+lessons test those conditions on real data, including the cases where a model loses to a
+baseline with no parameters at all. That is deliberate: a student who has only seen models
+succeed has not been taught to evaluate one.
 
 ## 🎯 The four lessons
 
@@ -159,7 +161,7 @@ features, the same code:
 | Per store | 45 | beats the baseline; one model in 0.2 s replaces 45 fits taking 4.6 s |
 | Per department | ~3,000 | MAPE reports 169% for a model that is not broken |
 
-Which gives three lessons the slides do not: a booster needs rows before it needs tuning;
+Which makes the slides' conditions concrete: a booster needs rows before it needs tuning;
 its real advantage is operational (*forecasting at scale*), not accuracy; and MAPE breaks on
 series that pass near zero. The final section takes the standard "detrend before boosting"
 fix and shows it improving the error 3.6× in one regime and making it worse in another —
