@@ -183,17 +183,23 @@ for t in (6, 12, 24):
 exclude = ["CustomerID", "Churn", "event", "time", "Tenure"]
 feature_cols = [c for c in df.columns if c not in exclude]
 
-X = pd.get_dummies(df[feature_cols], drop_first=True)
+X = pd.get_dummies(df[feature_cols], drop_first=True).astype(float)  # sksurv wants plain floats
 numeric_cols = df[feature_cols].select_dtypes(include=[np.number]).columns
-X[numeric_cols] = StandardScaler().fit_transform(X[numeric_cols])
-X = X.astype(float)  # scikit-survival wants a plain float matrix
 
 # scikit-survival expects the target as a structured array of (event, time).
 y = np.array(list(zip(df["event"], df["time"])), dtype=[("event", bool), ("time", float)])
 
+# Split FIRST, then scale (slide: "Zuerst immer Daten in Train/Test aufteilen –
+# dann erst vorverarbeiten!"). The scaler learns its mean/std from the training
+# customers only; the test customers are transformed with those numbers, exactly
+# as a new customer would be after deployment.
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.3, random_state=RANDOM_STATE, stratify=df["event"]
 )
+X_train, X_test = X_train.copy(), X_test.copy()  # write into our own frames, not views
+scaler = StandardScaler().fit(X_train[numeric_cols])
+X_train[numeric_cols] = scaler.transform(X_train[numeric_cols])
+X_test[numeric_cols] = scaler.transform(X_test[numeric_cols])
 
 print("\n" + "-" * 78)
 print("FEATURES")

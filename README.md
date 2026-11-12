@@ -114,12 +114,16 @@ Estimates, per customer, the **probability** of churning, and turns those scores
 targetable segments. Covers the look-alike time-window design (observation → buffer →
 outcome), three model families, cross-validation, `GridSearchCV`/`RandomizedSearchCV`, the
 metrics that matter for imbalanced data (precision/recall/F1, ROC-AUC, PR-AUC, confusion
-matrix), and learning/validation curves for diagnosing under- and overfitting.
+matrix), and learning/validation curves for diagnosing under- and overfitting — one
+complexity knob per model family (`C`, `max_depth`, `alpha`). Scaling lives inside a
+scikit-learn `Pipeline`, so cross-validation and tuning refit the scaler per fold and no
+validation data leaks into preprocessing.
 
 ### Survival (`survival.py`)
 
 Estimates **when** the event happens, and handles the customers who have not churned yet
-(right-censored) instead of discarding them. Covers Kaplan-Meier curves, Cox proportional
+(right-censored) instead of discarding them. Features are standardised *after* the train/test split,
+with the scaler fitted on training customers only. Covers Kaplan-Meier curves, Cox proportional
 hazards, Random Survival Forest and Survival SVM, plus the survival-specific metrics:
 concordance index, time-dependent AUC(t) and the integrated Brier score.
 

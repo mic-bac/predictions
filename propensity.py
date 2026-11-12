@@ -72,6 +72,7 @@ from sklearn.model_selection import (
     validation_curve,
 )
 from sklearn.neural_network import MLPClassifier
+from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import StandardScaler
 import xgboost as xgb
 
@@ -152,9 +153,18 @@ X_train, X_test, y_train, y_test = train_test_split(
 
 # Logistic regression and neural nets are distance/gradient based and need
 # comparable scales; trees split on thresholds and do not care.
-scaler = StandardScaler()
-X_train_scaled = scaler.fit_transform(X_train)
-X_test_scaled = scaler.transform(X_test)
+#
+# The scaler goes INSIDE a Pipeline instead of being fitted once up front
+# (slide: "Typische Fehlerquellen" — Pipelines prevent leakage). Fitting it on
+# all of X_train and then cross-validating would let every validation fold
+# influence the mean/std its own model was scaled with. Inside a Pipeline the
+# scaler is refitted on the training part of each fold, so CV, tuning and the
+# learning curves all score what a deployed model would actually see.
+
+
+def scaled(model):
+    """Wrap a scale-sensitive model so standardisation is part of the model."""
+    return Pipeline([("scale", StandardScaler()), ("model", model)])
 
 print(f"  Train: {len(X_train):,} ({y_train.mean() * 100:.1f}% churn)")
 print(f"  Test:  {len(X_test):,} ({y_test.mean() * 100:.1f}% churn)")
@@ -240,10 +250,10 @@ results = {}
 
 results["LR_Default"] = evaluate(
     "Logistic Regression",
-    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
-    X_train_scaled,
+    scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000)),
+    X_train,
     y_train,
-    X_test_scaled,
+    X_test,
     y_test,
 )
 results["XGB_Default"] = evaluate(
@@ -258,17 +268,19 @@ results["XGB_Default"] = evaluate(
 )
 results["NN_Default"] = evaluate(
     "Neural Network",
-    MLPClassifier(
-        hidden_layer_sizes=(32, 16),
-        activation="relu",
-        alpha=0.1,
-        random_state=RANDOM_STATE,
-        max_iter=200,
-        early_stopping=True,
+    scaled(
+        MLPClassifier(
+            hidden_layer_sizes=(32, 16),
+            activation="relu",
+            alpha=0.1,
+            random_state=RANDOM_STATE,
+            max_iter=200,
+            early_stopping=True,
+        )
     ),
-    X_train_scaled,
+    X_train,
     y_train,
-    X_test_scaled,
+    X_test,
     y_test,
 )
 
@@ -285,8 +297,8 @@ print(pd.DataFrame({k: v["metrics"] for k, v in results.items()}).round(4))
 
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=RANDOM_STATE)
 cv_scores = cross_val_score(
-    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
-    X_train_scaled,
+    scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000)),
+    X_train,
     y_train,
     cv=cv,
     scoring="roc_auc",
@@ -306,14 +318,15 @@ print(f"  Mean {cv_scores.mean():.4f} ± {cv_scores.std():.4f}  <- report this, 
 # combination; RandomizedSearchCV samples n_iter of them, which wins as soon as
 # the grid gets large. Both score each candidate by cross-validation.
 
+# Inside a Pipeline, hyperparameters are addressed as <step>__<param>.
 lr_grid = GridSearchCV(
-    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
-    {"C": [0.01, 0.1, 1, 10], "penalty": ["l1", "l2"], "solver": ["liblinear"]},
+    scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000)),
+    {"model__C": [0.01, 0.1, 1, 10], "model__penalty": ["l1", "l2"], "model__solver": ["liblinear"]},
     cv=3,
     scoring="roc_auc",
     n_jobs=-1,
 )
-lr_grid.fit(X_train_scaled, y_train)
+lr_grid.fit(X_train, y_train)
 print("\n" + "-" * 78)
 print("GRIDSEARCHCV — Logistic Regression")
 print("-" * 78)
@@ -344,10 +357,32 @@ print(f"  Sampled 10 of 72 combinations x 3 folds = 30 fits")
 print(f"  Best params: {xgb_search.best_params_}")
 print(f"  Best CV ROC-AUC: {xgb_search.best_score_:.4f}")
 
+nn_search = RandomizedSearchCV(
+    scaled(MLPClassifier(random_state=RANDOM_STATE, max_iter=200, early_stopping=True)),
+    {
+        "model__hidden_layer_sizes": [(32,), (32, 16), (64, 32)],
+        "model__alpha": [0.0001, 0.01, 0.1],
+        "model__learning_rate_init": [0.001, 0.01],
+    },
+    n_iter=8,
+    cv=3,
+    scoring="roc_auc",
+    n_jobs=-1,
+    random_state=RANDOM_STATE,
+)
+nn_search.fit(X_train, y_train)
+print("\n" + "-" * 78)
+print("RANDOMIZEDSEARCHCV — Neural Network")
+print("-" * 78)
+print(f"  Sampled 8 of 18 combinations x 3 folds = 24 fits")
+print(f"  Best params: {nn_search.best_params_}")
+print(f"  Best CV ROC-AUC: {nn_search.best_score_:.4f}")
+
 results["LR_Tuned"] = evaluate(
-    "Logistic Regression (tuned)", lr_grid.best_estimator_, X_train_scaled, y_train, X_test_scaled, y_test
+    "Logistic Regression (tuned)", lr_grid.best_estimator_, X_train, y_train, X_test, y_test
 )
 results["XGB_Tuned"] = evaluate("XGBoost (tuned)", xgb_search.best_estimator_, X_train, y_train, X_test, y_test)
+results["NN_Tuned"] = evaluate("Neural Network (tuned)", nn_search.best_estimator_, X_train, y_train, X_test, y_test)
 
 comparison = pd.DataFrame({k: v["metrics"] for k, v in results.items()}).round(4)
 best_name = comparison.loc["ROC-AUC"].idxmax()
@@ -425,8 +460,8 @@ fig_pr.show()
 #   Sweep it and watch where validation performance peaks and starts to fall.
 
 sizes, train_scores, val_scores = learning_curve(
-    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000),
-    X_train_scaled,
+    scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000)),
+    X_train,
     y_train,
     train_sizes=np.linspace(0.1, 1.0, 6),
     cv=3,
@@ -460,10 +495,10 @@ fig_lc.show()
 
 c_values = [0.001, 0.01, 0.1, 1, 10, 100]
 train_scores_vc, val_scores_vc = validation_curve(
-    LogisticRegression(random_state=RANDOM_STATE, max_iter=1000, solver="liblinear"),
-    X_train_scaled,
+    scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000, solver="liblinear")),
+    X_train,
     y_train,
-    param_name="C",
+    param_name="model__C",
     param_range=c_values,
     cv=3,
     scoring="roc_auc",
@@ -491,13 +526,47 @@ print(f"  Learning curve  — train {train_scores.mean(axis=1)[-1]:.4f} vs valid
 print(f"  Gap: {train_scores.mean(axis=1)[-1] - val_scores.mean(axis=1)[-1]:+.4f} (a large positive gap = overfitting)")
 print(f"  Validation curve — best C = {c_values[int(np.argmax(val_scores_vc.mean(axis=1)))]}")
 
+# Every model family has its own complexity knob. The same diagnostic on the
+# other two shows the under-fit / sweet-spot / over-fit shape on each of them.
+complexity_sweeps = {
+    "XGBoost — max_depth": (
+        xgb.XGBClassifier(random_state=RANDOM_STATE, eval_metric="logloss"),
+        "max_depth",
+        [1, 2, 3, 5, 7, 10],
+        "linear",
+    ),
+    "Neural Network — alpha (L2 penalty)": (
+        scaled(MLPClassifier(hidden_layer_sizes=(32, 16), random_state=RANDOM_STATE, max_iter=200, early_stopping=True)),
+        "model__alpha",
+        [0.0001, 0.001, 0.01, 0.1, 1.0],
+        "log",
+    ),
+}
+fig_sweeps = make_subplots(rows=1, cols=2, subplot_titles=[f"<b>{t}</b>" for t in complexity_sweeps])
+for col, (title, (estimator, param, values, axis_type)) in enumerate(complexity_sweeps.items(), start=1):
+    train_sw, val_sw = validation_curve(
+        estimator, X_train, y_train, param_name=param, param_range=values, cv=3, scoring="roc_auc", n_jobs=-1
+    )
+    for scores, label, color in [(train_sw, "Training", "#3498db"), (val_sw, "Validation", "#e67e22")]:
+        fig_sweeps.add_trace(
+            go.Scatter(x=values, y=scores.mean(axis=1), mode="lines+markers", name=label,
+                       line=dict(color=color), showlegend=col == 1),
+            row=1,
+            col=col,
+        )
+    fig_sweeps.update_xaxes(type=axis_type, title_text=param.replace("model__", ""), row=1, col=col)
+    print(f"  {title}: best = {values[int(np.argmax(val_sw.mean(axis=1)))]}")
+fig_sweeps.update_yaxes(title_text="ROC-AUC", row=1, col=1)
+fig_sweeps.update_layout(title_text="<b>Validation curves — one complexity knob per model family</b>", height=500)
+fig_sweeps.show()
+
 # %% 10. FEATURE IMPORTANCE
 # ==============================================================================
 # Two different questions: the linear model reports *direction and size* of an
 # effect, the tree model reports *how useful a feature was for splitting*.
 
 lr_importance = (
-    pd.DataFrame({"Feature": X_train.columns, "Weight": np.abs(results["LR_Tuned"]["model"].coef_[0])})
+    pd.DataFrame({"Feature": X_train.columns, "Weight": np.abs(results["LR_Tuned"]["model"].named_steps["model"].coef_[0])})
     .sort_values("Weight", ascending=False)
     .head(10)
 )
