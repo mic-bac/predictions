@@ -365,10 +365,10 @@ def fit_hybrid(
     if group is None:
         test["_trend"] = trends[None].predict(test[[time_column]])
     else:
-        test["_trend"] = [
-            trends[key].predict(np.array([[value]]))[0]
-            for key, value in zip(test[group], test[time_column])
-        ]
+        # Each group's straight line, applied to all its test rows at once.
+        intercept = test[group].map({key: line.intercept_ for key, line in trends.items()})
+        slope = test[group].map({key: line.coef_[0] for key, line in trends.items()})
+        test["_trend"] = intercept + slope * test[time_column]
 
     booster = XGBRegressor(**{**XGB_PARAMS, **params})
     booster.fit(train[feature_columns], train[target] - train["_trend"])

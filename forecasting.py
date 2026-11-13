@@ -79,6 +79,7 @@ from plotly.subplots import make_subplots
 # Make `src/` importable no matter where this script is launched from.
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src import forecast_models as fm  # noqa: E402
+from src import forecast_panel as fp  # noqa: E402
 from src import ts_core as tc  # noqa: E402
 from src.control_series import load_control_series  # noqa: E402
 from src.sales_data import EXTERNAL_FEATURES, WALMART_HOLIDAYS, prepare  # noqa: E402
@@ -287,43 +288,12 @@ show(figure)
 # XGBoost has no idea what a date is. Every temporal fact has to become a column.
 
 
-def build_features(
-    frame: pd.DataFrame, group: str | list[str] | None = None
-) -> pd.DataFrame:
-    """Turn a sales frame into the feature table a tree model needs.
-
-    Three kinds of column, each solving a different problem:
-
-    * **calendar** — week, month, quarter, plus the sine/cosine pair that stops
-      week 52 and week 1 looking 51 apart;
-    * **lags and rolling means** — the target, shifted. This is what carries the
-      *level* of the series; without it a tree has no idea what scale it is
-      predicting on;
-    * **``t``, a simple counter** — the only column expressing "later than".
-
-    ``lag_52`` costs a full year of every series: 52 rows that cannot have it.
-    On 143 weekly points that is more than a third of the data, and section 8 is
-    entirely about what that costs.
-    """
-    out = frame.copy()
-    calendar = tc.calendar_features(out["Date"]).reset_index(drop=True)
-    out = pd.concat(
-        [out.reset_index(drop=True), calendar[["week", "month", "quarter", "week_sin", "week_cos"]]],
-        axis=1,
-    )
-    if "Type" in out.columns:
-        out["Type"] = out["Type"].map({"A": 0, "B": 1, "C": 2}).astype(float)
-    keys = [group] if isinstance(group, str) else list(group or [])
-    out = out.sort_values(keys + ["Date"])
-    out["t"] = out.groupby(keys).cumcount() if keys else np.arange(len(out))
-    out = tc.lag_features(out, by=keys or None, lags=(1, 52), windows=(4,))
-    return out.dropna(subset=["lag_1", "lag_52", "roll_4"])
-
-
+# The feature builder lives in src/forecast_panel.py (the teaching app imports it
+# too); its source is printed here so nothing is hidden.
+build_features = fp.build_features
 show_source(build_features)
 
-CALENDAR = ["week", "month", "quarter", "week_sin", "week_cos", "t"]
-LAGS = ["lag_1", "lag_52", "roll_4"]
+CALENDAR, LAGS = fp.CALENDAR, fp.LAGS
 
 # %% 8. XGBOOST ON ONE SERIES — AND WHY IT LOSES
 # ==============================================================================
@@ -360,7 +330,12 @@ print(f"""
   {len(chain_train)} rows, and roughly {len(CALENDAR + LAGS)} features. Gradient boosting builds hundreds of
   trees, each splitting the data further; there is nothing here to split. This is
   not a model that needs better hyper-parameters, it is a model that needs more
-  rows — which is exactly what the next section gives it.""")
+  rows — which is exactly what the next section gives it.
+
+  The random forest lands close to the baseline (check the table — it may even
+  edge past it). Averaging many independent trees is steadier on tiny data than
+  boosting, but it has the same handful of rows to learn from: a tie with "same
+  week last year" is not a reason to run a forest.""")
 
 # %% 9. GIVE IT ROWS — THE STORE PANEL
 # ==============================================================================
@@ -387,18 +362,9 @@ panel_scores = {
 }
 
 # The honest comparison: one booster against one classical model per store.
-timer = time.perf_counter()
-ets_errors = []
-for store, group in store_panel.groupby("Store"):
-    series = tc.as_series(group)
-    store_train, store_test = tc.split_series(series, test_weeks=tc.TEST_WEEKS)
-    try:
-        _, store_forecast = fm.fit_ets(store_train, len(store_test))
-        ets_errors.append(np.abs(store_test.to_numpy() - store_forecast.to_numpy()) / store_test.to_numpy())
-    except Exception:  # noqa: BLE001 - a store with too little history simply opts out
-        continue
-ets_seconds = time.perf_counter() - timer
-ets_mape = 100 * float(np.mean(np.concatenate(ets_errors)))
+per_store = fp.ets_per_store(store_panel)
+ets_mape, ets_seconds = per_store["mape"], per_store["seconds"]
+ets_errors = range(per_store["models"])  # only its length is reported below
 
 print("\n45 SERIES INSTEAD OF ONE")
 print("-" * 78)
@@ -479,31 +445,12 @@ print("""
 # One fold would not settle this, because the differences are small enough to be
 # noise. Three rolling folds, same features, same everything else.
 
-dates = np.sort(panel["Date"].unique())
-
-
-def panel_folds(n_folds: int = 3, horizon: int = tc.TEST_WEEKS):
-    """Expanding-window folds over the panel, cut on the date so all stores align."""
-    for i in range(n_folds):
-        end = len(dates) - (n_folds - 1 - i) * horizon
-        cutoff, stop = dates[end - horizon], dates[end - 1]
-        yield (panel[panel["Date"] < cutoff],
-               panel[(panel["Date"] >= cutoff) & (panel["Date"] <= stop)])
+show_source(fp.score_panel)
 
 
 def score_panel(feature_columns: list[str], hybrid: bool = False) -> list[float]:
-    """MAPE on each fold for one feature set, optionally via the detrending hybrid."""
-    scores = []
-    for fold_train, fold_test in panel_folds():
-        if hybrid:
-            _, prediction = fm.fit_hybrid(fold_train, fold_test, feature_columns, group="Store")
-        else:
-            a, b, c, d = fm.time_ordered_validation_split(
-                fold_train[feature_columns], fold_train["Weekly_Sales"]
-            )
-            prediction = fm.fit_xgboost(a, c, b, d).predict(fold_test[feature_columns])
-        scores.append(tc.forecast_metrics(fold_test["Weekly_Sales"], prediction)["MAPE"])
-    return scores
+    """Three rolling folds over the store panel (see src/forecast_panel.py)."""
+    return fp.score_panel(panel, feature_columns, hybrid=hybrid)
 
 
 print("\nEXTERNAL FEATURES, THREE FOLDS")

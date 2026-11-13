@@ -32,6 +32,7 @@ predictions/
 │   ├── sales_data.py       loading, cleaning and the three sales grains
 │   ├── ts_core.py          splits, metrics, decomposition, baselines, features
 │   ├── forecast_models.py  ETS, SARIMA, Prophet, XGBoost, RF, hybrid wrappers
+│   ├── forecast_panel.py   feature table + panel evaluation for forecasting.py
 │   └── control_series.py   one extra series, used to show a method working
 └── data/                   Kaggle downloads (git-ignored, see below)
 ```
@@ -164,7 +165,7 @@ features, the same code:
 Which makes the slides' conditions concrete: a booster needs rows before it needs tuning;
 its real advantage is operational (*forecasting at scale*), not accuracy; and MAPE breaks on
 series that pass near zero. The final section takes the standard "detrend before boosting"
-fix and shows it improving the error 3.6× in one regime and making it worse in another —
+fix and shows it improving the error more than 3× in one regime and making it worse in another —
 because a lag feature already carries the level, so the fix is only right when the diagnosis
 is right.
 
