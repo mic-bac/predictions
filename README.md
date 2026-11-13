@@ -158,7 +158,7 @@ features, the same code:
 | Grain | Series | Result |
 |---|---|---|
 | Chain total | 1 | loses to a no-parameter baseline — only 78 usable training rows |
-| Per store | 45 | beats the baseline; one model in 0.2 s replaces 45 fits taking 4.6 s |
+| Per store | 45 | beats the baseline; one model in about half a second replaces 45 fits taking ~5 s |
 | Per department | ~3,000 | MAPE reports 169% for a model that is not broken |
 
 Which makes the slides' conditions concrete: a booster needs rows before it needs tuning;

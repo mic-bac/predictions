@@ -321,7 +321,8 @@ print(f"  Mean {cv_scores.mean():.4f} ± {cv_scores.std():.4f}  <- report this, 
 # Inside a Pipeline, hyperparameters are addressed as <step>__<param>.
 lr_grid = GridSearchCV(
     scaled(LogisticRegression(random_state=RANDOM_STATE, max_iter=1000)),
-    {"model__C": [0.01, 0.1, 1, 10], "model__penalty": ["l1", "l2"], "model__solver": ["liblinear"]},
+    # l1_ratio: 1 = L1 (lasso, can drop features), 0 = L2 (ridge, shrinks them).
+    {"model__C": [0.01, 0.1, 1, 10], "model__l1_ratio": [1, 0], "model__solver": ["liblinear"]},
     cv=3,
     scoring="roc_auc",
     n_jobs=-1,

@@ -58,7 +58,9 @@ XGB_PARAMS = dict(
     subsample=0.8,
     colsample_bytree=0.8,
     random_state=RANDOM_STATE,
-    n_jobs=-1,
+    # Leave the thread count to XGBoost (all cores). Since xgboost 3.4, n_jobs=-1
+    # no longer means "all cores" — it ran single-threaded and ~10x slower.
+    n_jobs=None,
     verbosity=0,
 )
 

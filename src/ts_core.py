@@ -104,7 +104,7 @@ def adf_report(series: pd.Series) -> dict:
     people read into it.
     """
     statistic, p_value, lags, n_obs, critical, _ = adfuller(
-        np.asarray(series, dtype=float), autolag="AIC"
+        np.asarray(series, dtype=float), autolag="AIC", result_object=False
     )
     return {
         "statistic": statistic,
