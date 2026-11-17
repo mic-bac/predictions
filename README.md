@@ -59,7 +59,7 @@ Every script runs top to bottom, prints its results and opens interactive Plotly
 They can also be stepped through cell by cell — the `# %%` markers make them notebooks in
 VS Code or Jupyter. All paths are anchored to the script, so they run from any directory.
 
-Approximate runtimes: `timeseries.py` ~40 s (SARIMA with 52 seasonal lags is most of it),
+Approximate runtimes: `timeseries.py` ~1 min (SARIMA with 52 seasonal lags, fitted four times, is most of it),
 `forecasting.py` ~20 s, `propensity.py` a few minutes with its hyper-parameter search,
 `survival.py` under a minute.
 
@@ -136,8 +136,16 @@ Starts with the question people skip — *is this series forecastable?* — and 
 a report covering grid regularity, available seasonal cycles, trend significance, seasonal
 strength and stationarity. Then decomposition, ADF, ACF/PACF, the correct way to split a
 time series, the four error measures (MAE, MSE, RMSE, MAPE) and when each is the right one,
-naive and seasonal-naive baselines, exponential smoothing written out by hand before
-Holt-Winters, SARIMA, and rolling-origin cross-validation.
+naive and seasonal-naive baselines (plus "same week last year × recent growth"), exponential
+smoothing written out by hand before Holt-Winters — and what Holt-Winters learned (level,
+trend, season) — SARIMA, and rolling-origin cross-validation of all of them.
+
+**Results, explained.** Holt-Winters wins all three folds (2.5% mean MAPE vs 3.1% for the
+baseline); SARIMA mostly reproduces the baseline, because its seasonal difference *is* "same week
+last year". The lesson then reads the misses against the calendar: the biggest one is Easter,
+which moved from 24 April 2011 to 8 April 2012, so every seasonal model misses the new Easter
+week and copies last year's peak into an ordinary week. The final forecast carries a ±band read
+off the cross-validation errors.
 
 **What this dataset can and cannot show.** 143 weeks is 2.75 seasonal cycles. A 52-week
 seasonal model needs two complete cycles before it can be fitted at all — so by the time
@@ -152,6 +160,13 @@ Prophet's additive components, changepoints and the `changepoint_prior_scale` kn
 causes overshooting; holiday and event effects; feature engineering for models that cannot
 see time; early stopping with a time-ordered validation split; the bias-variance trade-off
 made visible through tree depth.
+
+**The Easter payoff.** The time-series lesson ends on its biggest miss: Easter moved, and every
+seasonal model copied last year's calendar. Walmart's holiday list has no Easter; adding it to
+Prophet (one row per year, `ts_core.with_easter`) halves the Easter-week miss (+13.5% → +6.6%)
+and gives the lowest average error across the three folds (2.40% vs Holt-Winters' 2.51%).
+Adding the whole US public calendar instead makes Prophet *worse* (2.83%): the right holiday
+helps, more holidays do not.
 
 The through-line is that **the grain decides the winner**. The same XGBoost model, the same
 features, the same code:
