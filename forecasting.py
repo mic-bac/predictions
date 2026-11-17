@@ -29,6 +29,9 @@ see time unless you engineer it, but it can use any other column you have.
 
 What this lesson will find
 --------------------------
+0. Prophet with **Easter added to its holiday calendar** — the miss the previous
+   lesson ended on — has the lowest average error across the folds; adding the
+   whole US public calendar instead makes it worse.
 1. On a single 143-point series, XGBoost **loses badly** to the classical models
    from the previous lesson, for a reason that has nothing to do with tuning.
 2. On 45 parallel store series it beats the seasonal baseline, and its real
@@ -129,9 +132,13 @@ baseline_metrics = tc.forecast_metrics(test, baseline)
 print(f"\n  train {len(train)} weeks, test {HORIZON} weeks "
       f"({test.index[0].date()} to {test.index[-1].date()})")
 print(f"  seasonal-naive baseline to beat: MAPE {baseline_metrics['MAPE']:.2f}%")
-print("  (timeseries.py: Holt-Winters 1.59%, SARIMA 1.57% on this same window)")
+# The previous lesson's winner, refitted here (it takes a fraction of a second)
+# rather than quoted, so the comparison can never go stale.
+_, holt_winters = fm.fit_ets(train, HORIZON)
+print(f"  previous lesson's best, Holt-Winters:  MAPE "
+      f"{tc.forecast_metrics(test, holt_winters.values)['MAPE']:.2f}%  — the real bar")
 
-chain_results = {"seasonal naive": baseline}
+chain_results = {"seasonal naive": baseline, "Holt-Winters": holt_winters.values}
 
 # %% 3. PROPHET — AN ADDITIVE MODEL YOU CAN EXPLAIN
 # ==============================================================================
@@ -253,9 +260,63 @@ if "holidays" in components:
 
 print("""
   `add_country_holidays("US")` was also switched on, which loads the public
-  holiday calendar. Note what this buys: the model no longer has to *infer* that
-  late November matters from two observations of it. External knowledge, supplied
-  directly, is worth more than any amount of tuning when history is short.""")
+  holiday calendar. The idea is sound: the model no longer has to *infer* that
+  late November matters from two observations of it. Whether a given calendar
+  actually helps is an empirical question, though — tested just below.""")
+
+# --- The holiday Walmart's list forgot ----------------------------------------
+# timeseries.py ended on its biggest miss: Easter moved from 24 April 2011 to
+# 8 April 2012, and every seasonal model copied last year's calendar. Neither
+# Walmart's list nor the US public calendar contains Easter. One row per year
+# fixes that — and the place to judge it is the fold that contains Easter.
+
+show_source(tc.with_easter)
+easter_holidays = tc.with_easter(WALMART_HOLIDAYS, sales.index[0], test.index[-1] + pd.Timedelta(weeks=60))
+events = tc.calendar_events(sales.index, WALMART_HOLIDAYS)
+cv_folds = tc.rolling_origin_splits(sales, n_folds=3, horizon=tc.TEST_WEEKS)
+calendars = {  # name: (holiday frame, add the US public calendar?)
+    "Prophet": (WALMART_HOLIDAYS, False),
+    "Prophet + US calendar": (WALMART_HOLIDAYS, True),
+    "Prophet + Easter": (easter_holidays, False),
+}
+easter_cv = {name: [] for name in [*calendars, "Holt-Winters"]}
+easter_week_miss = {}
+for i, (fold_train, fold_test) in enumerate(cv_folds):
+    for name, (calendar, us) in calendars.items():
+        _, fold_forecast = fm.fit_prophet(fold_train, len(fold_test), holidays=calendar,
+                                          country_holidays="US" if us else None)
+        prediction = fm.prophet_forecast_only(fold_forecast, fold_test.index)["yhat"].to_numpy()
+        easter_cv[name].append(tc.forecast_metrics(fold_test, prediction)["MAPE"])
+        if i == 0:
+            misses = tc.explain_misses(fold_test, prediction, events)
+            easter_row = misses[misses["event this year"] == "Easter"]
+            if not easter_row.empty:
+                easter_week_miss[name] = (easter_row["week"].iloc[0], easter_row["miss %"].iloc[0])
+    _, hw_fold = fm.fit_ets(fold_train, len(fold_test))
+    easter_cv["Holt-Winters"].append(tc.forecast_metrics(fold_test, hw_fold.values)["MAPE"])
+
+print("\nEASTER — THE HOLIDAY THE CALENDAR FORGOT (3 rolling-origin folds)")
+print("-" * 78)
+print(f"  {'model':<20}{'fold 0':>9}{'fold 1':>9}{'fold 2':>9}{'mean':>9}")
+for name, scores in easter_cv.items():
+    print(f"  {name:<20}" + "".join(f"{s:>8.2f}%" for s in scores) + f"{np.mean(scores):>8.2f}%")
+if {"Prophet", "Prophet + Easter"} <= set(easter_week_miss):
+    week, before = easter_week_miss["Prophet"]
+    _, after = easter_week_miss["Prophet + Easter"]
+    print(f"""
+  The Easter week ({week}) was forecast {before:+.1f}% off without the holiday and
+  {after:+.1f}% off with it. Prophet had seen only two earlier Easters, so it learned
+  roughly half the effect — but it learned it on the right week. Across the folds
+  Prophet + Easter averages {np.mean(easter_cv['Prophet + Easter']):.2f}% — the lowest of the four, against
+  {np.mean(easter_cv['Holt-Winters']):.2f}% for Holt-Winters, the previous lesson's best.
+
+  The middle row is the other half of the lesson: the whole US public calendar
+  made Prophet *worse* ({np.mean(easter_cv['Prophet + US calendar']):.2f}%). Most public holidays do not move weekly
+  retail sales, and every extra event is one more effect to estimate from two
+  or three examples. The right holiday helps; more holidays do not.""")
+
+_, easter_forecast = fm.fit_prophet(train, HORIZON, holidays=easter_holidays)
+chain_results["Prophet + Easter"] = fm.prophet_forecast_only(easter_forecast, test.index)["yhat"].to_numpy()
 
 # %% 6. THE COMPONENTS, PLOTTED
 # ==============================================================================
@@ -654,13 +715,16 @@ print(f"""
   "Prophet: explainable additive components; strength is explainability and
    automation, not automatically higher accuracy"
       Holds. {prophet_seconds:.1f}s to fit, and section 6's trend, season and holiday
-      effect can be shown to somebody who does not model. Whether it is more
-      ACCURATE than a classical model is what the baseline comparison decides.
+      effect can be shown to somebody who does not model. Accuracy comes from what
+      you tell it: with Easter added to the calendar it averages
+      {np.mean(easter_cv['Prophet + Easter']):.2f}% across folds against Holt-Winters' {np.mean(easter_cv['Holt-Winters']):.2f}% — the right
+      holiday knowledge, not the algorithm, is the advantage (the full US calendar
+      scored {np.mean(easter_cv['Prophet + US calendar']):.2f}%).
 
   "XGBoost: strong with many rows (many stores/products in one model); on a single
    short series it often loses to simple baselines and cannot extrapolate a trend"
       Holds, both halves:
-        one series      XGBoost {tc.forecast_metrics(test, chain_results['XGBoost'])['MAPE']:.2f}%  vs  SARIMA 1.57%   loses
+        one series      XGBoost {tc.forecast_metrics(test, chain_results['XGBoost'])['MAPE']:.2f}%  vs  Holt-Winters {tc.forecast_metrics(test, chain_results['Holt-Winters'])['MAPE']:.2f}%   loses
         45 stores       XGBoost {panel_scores['XGBoost']['MAPE']:.2f}%  vs  seasonal naive {panel_scores['seasonal naive']['MAPE']:.2f}%   wins
       A booster needs rows before it needs tuning. The trend half is section 13.
 

@@ -161,6 +161,13 @@ causes overshooting; holiday and event effects; feature engineering for models t
 see time; early stopping with a time-ordered validation split; the bias-variance trade-off
 made visible through tree depth.
 
+**The Easter payoff.** The time-series lesson ends on its biggest miss: Easter moved, and every
+seasonal model copied last year's calendar. Walmart's holiday list has no Easter; adding it to
+Prophet (one row per year, `ts_core.with_easter`) halves the Easter-week miss (+13.5% → +6.6%)
+and gives the lowest average error across the three folds (2.40% vs Holt-Winters' 2.51%).
+Adding the whole US public calendar instead makes Prophet *worse* (2.83%): the right holiday
+helps, more holidays do not.
+
 The through-line is that **the grain decides the winner**. The same XGBoost model, the same
 features, the same code:
 

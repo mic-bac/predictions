@@ -478,6 +478,25 @@ def explain_misses(
     return table.reset_index(drop=True)
 
 
+def with_easter(holidays: pd.DataFrame | None, start, end) -> pd.DataFrame:
+    """A Prophet holiday frame with Easter added for every year from start to end.
+
+    Walmart's official holiday list (Super Bowl, Labor Day, Thanksgiving,
+    Christmas) has no Easter — yet Easter is the event that moves by weeks, and
+    so the one a "same week last year" pattern cannot learn. Prophet accepts a
+    frame of dated events and learns one effect per event name; adding Easter is
+    one row per year. ``end`` should reach past the forecast horizon, because the
+    model needs to know where *next* Easter falls too.
+    """
+    weeks = pd.date_range(pd.Timestamp(start), pd.Timestamp(end), freq="W-FRI")
+    easter = pd.DataFrame(
+        {"holiday": "Easter", "ds": list(easter_weeks(weeks)), "lower_window": 0, "upper_window": 0}
+    )
+    if holidays is None:
+        return easter
+    return pd.concat([holidays, easter], ignore_index=True)
+
+
 def cv_interval(errors_pct, coverage: float = 0.8) -> float:
     """Half-width of an honest forecast band, read off past forecast errors.
 

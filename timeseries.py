@@ -647,8 +647,8 @@ print(f"""
   The other misses are mostly the level: 2012 runs above 2011, so copies of
   2011 come out a little low — what the growth factor and Holt-Winters' level
   correct. Fixing Easter needs a holiday feature that knows where Easter falls
-  each year. Prophet in forecasting.py takes such a calendar — but Walmart's
-  four official holidays do not include Easter, so it would have to be added.""")
+  each year. Walmart's four official holidays do not include it — forecasting.py
+  adds it to Prophet's calendar and measures what that is worth.""")
 
 # %% 14. COMPARISON
 # ==============================================================================
