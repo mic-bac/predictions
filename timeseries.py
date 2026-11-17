@@ -559,7 +559,7 @@ for i, (fold_train, fold_test) in enumerate(folds):
         row[name] = prediction
     cv_forecasts.append((fold_train, fold_test, row))
     window = f"{fold_test.index[0].date()} to {fold_test.index[-1].date()}"
-    print(f"  {i:<6}{window:>26}" + "".join(f"{cv_scores[n][-1]:>15.2f}%" for n in cv_models))
+    print(f"  {i + 1:<6}{window:>26}" + "".join(f"{cv_scores[n][-1]:>15.2f}%" for n in cv_models))
 
 print()
 for name, scores in cv_scores.items():
@@ -576,7 +576,7 @@ print(f"""
   more trustworthy verdict than any single window. SARIMA scores within 0.1
   points of the free baseline in {sarima_like_baseline} of {len(folds)} folds: its seasonal difference
   (0,1,1,52) *is* "compare with the same week last year", so on short history it
-  mostly reproduces it. Note also that every model is worst in fold 0 — section
+  mostly reproduces it. Note also that every model is worst in fold 1 — section
   13 shows why.""")
 
 # Now the finding that governs how much any of this can be trusted.
@@ -632,7 +632,7 @@ show_source(tc.explain_misses)
 events = tc.calendar_events(sales.index, WALMART_HOLIDAYS)
 fold0_train, fold0_test, fold0_forecasts = cv_forecasts[0]
 misses = tc.explain_misses(fold0_test, fold0_forecasts["seasonal naive"], events, top=3)
-print("\nTHE THREE BIGGEST MISSES OF THE SEASONAL-NAIVE FORECAST, FOLD 0")
+print("\nTHE THREE BIGGEST MISSES OF THE SEASONAL-NAIVE FORECAST, FOLD 1")
 print("-" * 78)
 print(misses[["week", "miss %", "event this year", "same week last year"]].to_string(
     index=False, float_format=lambda v: f"{v:+.1f}"))

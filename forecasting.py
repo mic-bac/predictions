@@ -297,7 +297,7 @@ for i, (fold_train, fold_test) in enumerate(cv_folds):
 
 print("\nEASTER — THE HOLIDAY THE CALENDAR FORGOT (3 rolling-origin folds)")
 print("-" * 78)
-print(f"  {'model':<20}{'fold 0':>9}{'fold 1':>9}{'fold 2':>9}{'mean':>9}")
+print(f"  {'model':<20}{'fold 1':>9}{'fold 2':>9}{'fold 3':>9}{'mean':>9}")
 for name, scores in easter_cv.items():
     print(f"  {name:<20}" + "".join(f"{s:>8.2f}%" for s in scores) + f"{np.mean(scores):>8.2f}%")
 if {"Prophet", "Prophet + Easter"} <= set(easter_week_miss):
@@ -520,7 +520,7 @@ comparison = {
     "calendar + lags": score_panel(PANEL_FEATURES),
     "+ temperature, fuel, CPI, unemployment": score_panel(PANEL_FEATURES + EXTERNAL_FEATURES),
 }
-print(f"  {'feature set':<40}{'fold0':>8}{'fold1':>8}{'fold2':>8}{'mean':>9}")
+print(f"  {'feature set':<40}{'fold1':>8}{'fold2':>8}{'fold3':>8}{'mean':>9}")
 for name, scores in comparison.items():
     print(f"  {name:<40}" + "".join(f"{s:>7.2f}%" for s in scores) + f"{np.mean(scores):>8.2f}%")
 
@@ -624,7 +624,7 @@ regimes = {
     "no lags     | plain XGBoost": score_panel(NO_LAGS),
     "no lags     | trend + XGBoost": score_panel(NO_LAGS, hybrid=True),
 }
-print(f"  {'regime':<34}{'fold0':>8}{'fold1':>8}{'fold2':>8}{'mean':>9}")
+print(f"  {'regime':<34}{'fold1':>8}{'fold2':>8}{'fold3':>8}{'mean':>9}")
 for name, scores in regimes.items():
     print(f"  {name:<34}" + "".join(f"{s:>7.2f}%" for s in scores) + f"{np.mean(scores):>8.2f}%")
 
