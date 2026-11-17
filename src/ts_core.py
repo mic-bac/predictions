@@ -366,6 +366,131 @@ def simple_exponential_smoothing(series: pd.Series, alpha: float = 0.4) -> pd.Se
     return pd.Series(smoothed, index=series.index, name=f"ses_alpha_{alpha}")
 
 
+def seasonal_naive_growth_forecast(
+    train: pd.Series, horizon: int, window: int = TEST_WEEKS, period: int = SEASONAL_PERIOD
+) -> np.ndarray:
+    """"The same week last year, times how much we have grown since."
+
+    The seasonal-naive baseline copies last year's level along with last year's
+    season, so in a year that runs a few percent higher it under-forecasts
+    almost every week. This keeps the copy and corrects only the level::
+
+        growth   = (last ``window`` weeks) / (the same ``window`` weeks a year earlier)
+        forecast = seasonal naive * growth
+
+    One extra number, computable on a napkin — and it closes most of the gap
+    between the free baseline and Holt-Winters, whose *level* equation does the
+    same job continuously. That makes it the explainable step in between.
+    """
+    if len(train) < period + window:
+        raise ValueError(f"need at least {period + window} weeks of history")
+    recent = float(train.iloc[-window:].sum())
+    year_before = float(train.iloc[-window - period : -period].sum())
+    return seasonal_naive_forecast(train, horizon, period) * (recent / year_before)
+
+
+# ---------------------------------------------------------------------------
+# Reading the misses — which calendar events explain the biggest errors?
+# ---------------------------------------------------------------------------
+
+
+def easter_weeks(index: pd.DatetimeIndex) -> dict[pd.Timestamp, str]:
+    """The pre-Easter shopping week for every year the index covers.
+
+    Easter moves (24 April 2011, 8 April 2012), and that is exactly what a
+    "same week last year" forecast cannot know. The shopping happens *before*
+    Easter Sunday, so the week that matters is the one ending on Good Friday;
+    in Walmart's data, where each date is the Friday that ends the week, that
+    is the date two days before Easter Sunday.
+    """
+    weeks = {}
+    for year in sorted(set(index.year)):
+        easter = pd.Timestamp(year=year, month=1, day=1) + pd.offsets.Easter()
+        inside = index[(index > easter - pd.Timedelta(days=9)) & (index <= easter - pd.Timedelta(days=2))]
+        if len(inside):
+            weeks[inside[-1]] = "Easter"
+    return weeks
+
+
+def calendar_events(index: pd.DatetimeIndex, holidays: pd.DataFrame | None = None) -> pd.Series:
+    """Label every week with the event in it ("" for an ordinary week).
+
+    ``holidays`` is a frame with ``holiday`` and ``ds`` columns (the shape
+    Prophet uses, e.g. ``sales_data.WALMART_HOLIDAYS``); Easter is added on top
+    because it is the one big retail event that moves by weeks, not days.
+    """
+    labels = pd.Series("", index=index, name="event")
+    if holidays is not None:
+        for _, row in holidays.iterrows():
+            day = pd.Timestamp(row["ds"])
+            if day in labels.index:
+                labels[day] = row["holiday"]
+    for week, name in easter_weeks(index).items():
+        labels[week] = name if not labels[week] else f"{labels[week]} + {name}"
+    return labels
+
+
+def explain_misses(
+    actual: pd.Series,
+    forecast,
+    events: pd.Series,
+    period: int = SEASONAL_PERIOD,
+    top: int | None = None,
+) -> pd.DataFrame:
+    """Every forecast week with its miss, and the calendar on both sides of it.
+
+    A seasonal forecast copies (or learns from) the same week a year earlier.
+    So a big miss usually has one of two causes, and both are visible by
+    putting this week's event next to last year's:
+
+    * an event **this year but not last year** — the forecast copied an
+      ordinary week, so the peak is missed (forecast too low);
+    * an event **last year but not this year** — last year's peak is copied
+      into an ordinary week (forecast too high).
+
+    ``miss %`` is ``(actual - forecast) / actual``: positive means the forecast
+    was too low. ``top`` keeps only the largest misses.
+    """
+    forecast = np.asarray(forecast, dtype=float)
+    rows = []
+    for week, value, predicted in zip(actual.index, actual.to_numpy(dtype=float), forecast):
+        last_year = week - pd.Timedelta(weeks=period)
+        now = events.get(week, "")
+        before = events.get(last_year, "")
+        if now and now != before:
+            why = f"{now} fell in this week this year, but not in the same week last year"
+        elif before and before != now:
+            why = f"last year's {before} peak sits in this week; this year it did not"
+        else:
+            why = ""
+        rows.append({
+            "week": week.date(),
+            "actual": value,
+            "forecast": predicted,
+            "miss %": 100 * (value - predicted) / value,
+            "event this year": now,
+            "same week last year": f"{last_year.date()}" + (f" ({before})" if before else ""),
+            "why": why,
+        })
+    table = pd.DataFrame(rows)
+    if top is not None:
+        table = table.reindex(table["miss %"].abs().sort_values(ascending=False).index[:top])
+    return table.reset_index(drop=True)
+
+
+def cv_interval(errors_pct, coverage: float = 0.8) -> float:
+    """Half-width of an honest forecast band, read off past forecast errors.
+
+    No distribution, no formula: take every weekly percentage miss from the
+    cross-validation folds and ask how large a miss covered ``coverage`` of
+    them. "In 8 of 10 past weeks we were within ±x%" is a sentence a planner
+    can use, and it inherits every flaw of the folds — including that none of
+    them contains Christmas.
+    """
+    errors = np.abs(np.asarray(errors_pct, dtype=float))
+    return float(np.quantile(errors, coverage))
+
+
 # ---------------------------------------------------------------------------
 # Features for the models that need a table rather than a series
 # ---------------------------------------------------------------------------

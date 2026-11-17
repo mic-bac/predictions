@@ -112,6 +112,35 @@ def fit_ets(
     return fitted, forecast
 
 
+def holt_winters_parts(fitted) -> dict:
+    """What a fitted Holt-Winters model has learned, in readable pieces.
+
+    The model is three running estimates — a **level** (where sales are now), a
+    **trend** (how much they move per week) and a **season** (how far each week
+    of the year sits above or below the level). Each one is updated by its own
+    smoothing weight: α for the level, β for the trend, γ for the season. Small
+    weights mean "change your mind slowly".
+
+    Returning them lets a lesson check the model against the suitability
+    report: if the report found no trend, the fitted trend should be close to
+    zero — and here it is.
+    """
+    params = fitted.params
+    level = pd.Series(np.asarray(fitted.level), index=fitted.model.data.row_labels, name="level")
+    trend = pd.Series(np.asarray(fitted.trend), index=level.index, name="trend")
+    season = pd.Series(np.asarray(fitted.season), index=level.index, name="season")
+    last_level, last_trend = float(level.iloc[-1]), float(trend.iloc[-1])
+    return {
+        "alpha": float(params["smoothing_level"]),
+        "beta": float(params["smoothing_trend"]),
+        "gamma": float(params["smoothing_seasonal"]),
+        "parts": pd.concat([level, trend, season], axis=1),
+        "last_level": last_level,
+        "trend_per_week": last_trend,
+        "trend_pct_per_year": 100 * last_trend * SEASONAL_PERIOD / last_level,
+    }
+
+
 def fit_sarima(
     train: pd.Series,
     horizon: int,
@@ -133,7 +162,7 @@ def fit_sarima(
 
     A warning about cost. Fitting 52 seasonal lags means the state-space
     representation carries a state vector of length ~52, and this single call
-    takes roughly 25 seconds — a hundred times slower than Holt-Winters on the
+    takes 10-20 seconds — over a hundred times slower than Holt-Winters on the
     same data, for a slightly worse forecast. That trade is worth seeing once.
     """
     fitted = SARIMAX(

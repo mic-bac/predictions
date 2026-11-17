@@ -79,7 +79,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from src import forecast_models as fm  # noqa: E402
 from src import ts_core as tc  # noqa: E402
 from src.control_series import load_control_series  # noqa: E402
-from src.sales_data import deflate, prepare  # noqa: E402
+from src.sales_data import WALMART_HOLIDAYS, deflate, prepare  # noqa: E402
 
 pd.set_option("display.width", 200)
 pd.set_option("display.max_columns", 30)
@@ -311,7 +311,7 @@ print(f"  first difference statistic {adf_diff['statistic']:>8.2f}   p={adf_diff
 print("""
   Already stationary at the level, which follows directly from having no trend:
   there is nothing pulling the mean away. So differencing is optional here, and
-  the SARIMA fitted in section 10 uses d=0 for the non-seasonal part.
+  the SARIMA fitted in section 11 uses d=0 for the non-seasonal part.
 
   One caveat worth carrying: strong seasonality can make this test say
   "stationary" about a series nobody would call flat, because the seasonal swings
@@ -412,6 +412,7 @@ results = {
     "naive (last value)": tc.naive_forecast(train, len(test)),
     "seasonal naive (t-52)": tc.seasonal_naive_forecast(train, len(test)),
     "mean of history": np.repeat(train.mean(), len(test)),
+    "seasonal naive × growth": tc.seasonal_naive_growth_forecast(train, len(test)),
 }
 
 print("\nBASELINES")
@@ -422,6 +423,16 @@ print("""
   The gap between the two naive forecasts is the value of knowing about
   seasonality, and nothing else. Same data, same zero parameters; one repeats
   last week, the other repeats last year.""")
+
+show_source(tc.seasonal_naive_growth_forecast)
+recent = train.iloc[-tc.TEST_WEEKS:].sum()
+year_before = train.iloc[-tc.TEST_WEEKS - tc.SEASONAL_PERIOD : -tc.SEASONAL_PERIOD].sum()
+print(f"""
+  "Same week last year" also copies last year's *level*. The last 13 training
+  weeks sold {recent / 1e6:,.0f}M against {year_before / 1e6:,.0f}M in the same weeks a year earlier —
+  {100 * (recent / year_before - 1):+.1f}%. Multiply last year's weeks by that one number and the
+  baseline improves from {tc.forecast_metrics(test, results['seasonal naive (t-52)'])['MAPE']:.2f}% to {tc.forecast_metrics(test, results['seasonal naive × growth'])['MAPE']:.2f}%. One napkin
+  number; keep it in mind when Holt-Winters' *level* appears below.""")
 
 # %% 10. EXPONENTIAL SMOOTHING
 # ==============================================================================
@@ -468,6 +479,20 @@ print("""
   That warning is section 3's "2.75 cycles" arriving in person: 52 seasonal terms
   from 130 observations is thin, and the library is right to say so.""")
 
+show_source(fm.holt_winters_parts)
+hw = fm.holt_winters_parts(ets_model)
+print(f"""
+  WHAT HOLT-WINTERS LEARNED
+    level   alpha = {hw['alpha']:.2f}   sales now run at about {hw['last_level'] / 1e6:,.1f}M a week
+    trend   beta  = {hw['beta']:.2f}   +{hw['trend_per_week'] / 1e3:,.0f}k a week, {hw['trend_pct_per_year']:+.1f}% a year
+    season  gamma = {hw['gamma']:.2f}   each week's seasonal offset, updated slowly
+
+  Small weights everywhere: the model changes its mind slowly, which is right
+  for a series this regular. The trend it found is small — the same story as
+  the suitability report's "no clear trend" — and the level does what the
+  growth factor above did by hand: it lifts last year's season to this year's
+  sales.""")
+
 # %% 11. ARIMA / SARIMA
 # ==============================================================================
 # Three separate ideas behind one acronym, one parameter for each:
@@ -513,22 +538,46 @@ show_source(tc.rolling_origin_splits)
 
 folds = tc.rolling_origin_splits(sales, n_folds=3, horizon=tc.TEST_WEEKS)
 
-print("\nROLLING-ORIGIN CROSS-VALIDATION")
+print("\nROLLING-ORIGIN CROSS-VALIDATION (SARIMA makes this take ~20 s)")
 print("-" * 78)
-print(f"  {'fold':<6}{'train':>7}{'test window':>28}{'seas.naive':>12}{'ETS':>9}")
-cv_scores = {"seasonal naive": [], "Holt-Winters": []}
+cv_models = {
+    "seasonal naive": lambda tr, h: tc.seasonal_naive_forecast(tr, h),
+    "naive × growth": lambda tr, h: tc.seasonal_naive_growth_forecast(tr, h),
+    "Holt-Winters": lambda tr, h: fm.fit_ets(tr, h)[1].values,
+    "SARIMA": lambda tr, h: fm.fit_sarima(tr, h)[1].values,
+}
+print(f"  {'fold':<6}{'test window':>26}" + "".join(f"{name:>16}" for name in cv_models))
+cv_scores = {name: [] for name in cv_models}
+cv_errors = {name: [] for name in cv_models}  # weekly % misses, for the band in section 14
+cv_forecasts = []
 for i, (fold_train, fold_test) in enumerate(folds):
-    baseline = tc.seasonal_naive_forecast(fold_train, len(fold_test))
-    _, fold_forecast = fm.fit_ets(fold_train, len(fold_test))
-    baseline_mape = tc.forecast_metrics(fold_test, baseline)["MAPE"]
-    ets_mape = tc.forecast_metrics(fold_test, fold_forecast.values)["MAPE"]
-    cv_scores["seasonal naive"].append(baseline_mape)
-    cv_scores["Holt-Winters"].append(ets_mape)
+    row = {}
+    for name, forecast_fn in cv_models.items():
+        prediction = forecast_fn(fold_train, len(fold_test))
+        cv_scores[name].append(tc.forecast_metrics(fold_test, prediction)["MAPE"])
+        cv_errors[name].extend(100 * (fold_test.to_numpy() - prediction) / fold_test.to_numpy())
+        row[name] = prediction
+    cv_forecasts.append((fold_train, fold_test, row))
     window = f"{fold_test.index[0].date()} to {fold_test.index[-1].date()}"
-    print(f"  {i:<6}{len(fold_train):>7}{window:>28}{baseline_mape:>11.2f}%{ets_mape:>8.2f}%")
+    print(f"  {i:<6}{window:>26}" + "".join(f"{cv_scores[n][-1]:>15.2f}%" for n in cv_models))
 
+print()
 for name, scores in cv_scores.items():
-    print(f"  {name:<22} mean {np.mean(scores):.2f}%   spread {min(scores):.2f}-{max(scores):.2f}%")
+    print(f"  {name:<16} mean {np.mean(scores):.2f}%   spread {min(scores):.2f}-{max(scores):.2f}%")
+cv_winner = min(cv_scores, key=lambda n: np.mean(cv_scores[n]))
+wins = sum(
+    cv_scores[cv_winner][i] == min(cv_scores[n][i] for n in cv_models) for i in range(len(folds))
+)
+sarima_like_baseline = sum(
+    abs(a - b) < 0.1 for a, b in zip(cv_scores["SARIMA"], cv_scores["seasonal naive"])
+)
+print(f"""
+  {cv_winner} has the lowest error on average and wins {wins} of {len(folds)} folds — a
+  more trustworthy verdict than any single window. SARIMA scores within 0.1
+  points of the free baseline in {sarima_like_baseline} of {len(folds)} folds: its seasonal difference
+  (0,1,1,52) *is* "compare with the same week last year", so on short history it
+  mostly reproduces it. Note also that every model is worst in fold 0 — section
+  13 shows why.""")
 
 # Now the finding that governs how much any of this can be trusted.
 week_of_year = sales.index.isocalendar().week.to_numpy()
@@ -573,7 +622,35 @@ if len(christmas_train) > 52:
   number in this lesson comes from the quiet window and is flattered by it. Say
   so when you present one.""")
 
-# %% 13. COMPARISON
+# %% 13. READING THE MISSES
+# ==============================================================================
+# A score says how much a forecast missed. Explaining a model means saying
+# *where* and *why*. A seasonal forecast leans on the same week a year earlier,
+# so put the calendar of both years next to every miss.
+
+show_source(tc.explain_misses)
+events = tc.calendar_events(sales.index, WALMART_HOLIDAYS)
+fold0_train, fold0_test, fold0_forecasts = cv_forecasts[0]
+misses = tc.explain_misses(fold0_test, fold0_forecasts["seasonal naive"], events, top=3)
+print("\nTHE THREE BIGGEST MISSES OF THE SEASONAL-NAIVE FORECAST, FOLD 0")
+print("-" * 78)
+print(misses[["week", "miss %", "event this year", "same week last year"]].to_string(
+    index=False, float_format=lambda v: f"{v:+.1f}"))
+easter = tc.easter_weeks(sales.index)
+print(f"""
+  Easter moves. The pre-Easter shopping week was {', '.join(str(d.date()) for d in easter)} —
+  so "the same week last year" copies an ordinary week into this year's Easter
+  (forecast {misses.loc[0, 'miss %']:+.0f}% too low) and last year's Easter peak into an ordinary
+  week two weeks later. Holt-Winters makes the same two mistakes: it, too, has
+  only learned "week 14 of the year", not "the week before Easter".
+
+  The other misses are mostly the level: 2012 runs above 2011, so copies of
+  2011 come out a little low — what the growth factor and Holt-Winters' level
+  correct. Fixing Easter needs a holiday feature that knows where Easter falls
+  each year. Prophet in forecasting.py takes such a calendar — but Walmart's
+  four official holidays do not include Easter, so it would have to be added.""")
+
+# %% 14. COMPARISON
 # ==============================================================================
 
 table = tc.metrics_table({name: tc.forecast_metrics(test, p) for name, p in results.items()})
@@ -596,11 +673,25 @@ else:
   A {100 * (1 - best['MAPE'] / baseline_mape):.0f}% reduction in error over a forecast that has no parameters at
   all — real, but worth keeping in proportion.""")
 
+band = tc.cv_interval(cv_errors["Holt-Winters"], coverage=0.8)
+typical_week = test.mean()
+print(f"""
+  How far off to expect: in the cross-validation folds, 8 of 10 Holt-Winters
+  weeks missed by less than ±{band:.1f}% — about ±{band / 100 * typical_week / 1e6:,.1f}M on a typical
+  {typical_week / 1e6:,.0f}M week. That band is drawn on the chart below. It comes from quiet
+  quarters only (section 12), so do not stretch it over Christmas.""")
+
 figure = go.Figure()
 figure.add_trace(go.Scatter(x=train.index[-52:], y=train.values[-52:], mode="lines",
                             name="history", line=dict(color=GREY, width=1.5)))
 figure.add_trace(go.Scatter(x=test.index, y=test.values, mode="lines+markers",
                             name="actual", line=dict(color=BLUE, width=2.5)))
+ets_values = results["Holt-Winters (ETS)"]
+figure.add_trace(go.Scatter(
+    x=list(test.index) + list(test.index[::-1]),
+    y=list(ets_values * (1 + band / 100)) + list((ets_values * (1 - band / 100))[::-1]),
+    fill="toself", fillcolor="rgba(46, 204, 113, 0.15)", line=dict(width=0),
+    name=f"Holt-Winters ±{band:.1f}% (80% of past weeks)"))
 for name in ("seasonal naive (t-52)", "Holt-Winters (ETS)", "SARIMA(1,0,1)(0,1,1,52)"):
     figure.add_trace(go.Scatter(x=test.index, y=results[name], mode="lines",
                                 name=name, line=dict(width=1.8, dash="dot")))
@@ -618,7 +709,7 @@ figure.update_layout(height=360, title=f"<b>Residuals — {best['model']}</b>",
                      yaxis_title="actual - forecast")
 show(figure)
 
-# %% 14. WHAT THE SLIDES CLAIM, AND WHAT THIS DATA SHOWS
+# %% 15. WHAT THE SLIDES CLAIM, AND WHAT THIS DATA SHOWS
 # ==============================================================================
 
 print("\nSLIDES VS DATA")
@@ -635,10 +726,10 @@ print(f"""
       because it never had a trend, not because we differenced one away.
 
   "ARIMA ... often better than exponential smoothing"
-      Not here. SARIMA scored {tc.forecast_metrics(test, results['SARIMA(1,0,1)(0,1,1,52)'])['MAPE']:.2f}% against Holt-Winters' {tc.forecast_metrics(test, results['Holt-Winters (ETS)'])['MAPE']:.2f}% —
-      a difference far smaller than the spread between cross-validation folds,
-      for {sarima_seconds / max(ets_seconds, 1e-9):.0f}x the compute. On a series this seasonal and this short,
-      they are the same model wearing different clothes.
+      Not here. Across the three folds SARIMA averaged {np.mean(cv_scores['SARIMA']):.2f}% against
+      Holt-Winters' {np.mean(cv_scores['Holt-Winters']):.2f}% and the free baseline's {np.mean(cv_scores['seasonal naive']):.2f}%, for
+      {sarima_seconds / max(ets_seconds, 1e-9):.0f}x the compute of Holt-Winters. On a series this seasonal and this
+      short, its seasonal difference mostly reproduces "same week last year".
 
   "MAE, RMSE and MAPE are indispensable"
       Holds. But choosing between them is a business decision, and MAPE in
